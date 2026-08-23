@@ -9,7 +9,7 @@ event-delivery correctness, pre-deployment, with generated patches.**
 
 Repo-only. No cloud credentials, ever.
 
-## Status — Session 1 (A1) complete
+## Status — Session 2 (A2) complete
 
 | Component | State |
 |---|---|
@@ -17,7 +17,7 @@ Repo-only. No cloud credentials, ever.
 | Typed resource model | done |
 | Event-flow graph (poll / rule_target / subscribe / publish / writes / redrive / dlq / on_failure) | done |
 | Fixture harness + rule interface | done |
-| Rule pack EDA001–005 (BLOCK) | next — A2 |
+| Rule pack EDA001–005 (BLOCK) | done |
 | EDA006–012, reporters, CLI, GitHub Action | A3–A4 |
 
 ## Develop

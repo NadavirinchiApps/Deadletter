@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  ShipmentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: shipment-queue
+      VisibilityTimeout: 400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ShipmentDlq.Arn
+        maxReceiveCount: 5
+  ShipmentDlq:
+    Type: AWS::SQS::Queue
+    Properties: {QueueName: shipment-dlq}
+  ShipFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.ship
+      Runtime: python3.12
+      Timeout: 60
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ShipmentQueue.Arn
+            BatchSize: 10
