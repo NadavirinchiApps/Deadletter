@@ -1,0 +1,22 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  ClickStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: click-stream
+      ShardCount: 2
+  AggregateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aggregate
+      Handler: app.handler
+      Runtime: python3.12
+      Timeout: 60
+  ClickMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ClickStream.Arn
+      FunctionName: !Ref AggregateFunction
+      StartingPosition: LATEST
+      BatchSize: 1

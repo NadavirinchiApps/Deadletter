@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  InvoiceQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: invoice-queue
+      VisibilityTimeout: 400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt InvoiceDlq.Arn
+        maxReceiveCount: 5
+  InvoiceDlq:
+    Type: AWS::SQS::Queue
+    Properties: {QueueName: invoice-dlq}
+  RenderInvoiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.render
+      Runtime: python3.12
+      Timeout: 60
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt InvoiceQueue.Arn
+            BatchSize: 1
+  BillingBus:
+    Type: AWS::Events::EventBus
+    Properties: {Name: billing-bus}
+  InvoicePaidRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref BillingBus
+      EventPattern:
+        detail-type: [InvoicePaid]
+      Targets:
+        - Id: to-ledger
+          Arn: !GetAtt LedgerFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt LedgerDlq.Arn
+  LedgerDlq:
+    Type: AWS::SQS::Queue
+    Properties: {QueueName: ledger-dlq}
+  LedgerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.ledger
+      Runtime: python3.12
+      Timeout: 15

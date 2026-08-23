@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  PaymentsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: payments-queue
+      VisibilityTimeout: 190
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PaymentsDlq.Arn
+        maxReceiveCount: 5
+  PaymentsDlq:
+    Type: AWS::SQS::Queue
+    Properties: {QueueName: payments-dlq}
+  ChargeCardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.charge
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PaymentsQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 10

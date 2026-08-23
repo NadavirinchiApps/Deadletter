@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  AuditBus:
+    Type: AWS::Events::EventBus
+    Properties: {Name: audit-bus}
+  CatchAllRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref AuditBus
+      EventPattern:
+        source:
+          - anything-but: enricher.internal
+      Targets:
+        - Id: to-enricher
+          Arn: !GetAtt EnrichFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt EnrichDlq.Arn
+  EnrichDlq:
+    Type: AWS::SQS::Queue
+    Properties: {QueueName: enrich-dlq}
+  EnrichFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.enrich
+      Runtime: python3.12
+      Timeout: 15
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref AuditBus
