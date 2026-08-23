@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Order processing workload. Deliberately realistic rather than minimal:
+  Globals, SAM Events, a hand-written EventSourceMapping, an SNS fan-out,
+  a Kinesis analytics branch, and a Step Functions fulfilment flow.
+  Several event-delivery defects are planted here on purpose.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        ORDERS_TABLE: !Ref OrdersTable
+
+Resources:
+
+  # ---- ingress -------------------------------------------------------
+  OrdersApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+
+  CreateOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.create_order
+      CodeUri: src/create_order/
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref OrdersBus
+      Events:
+        Create:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OrdersApi
+            Path: /orders
+            Method: POST
+
+  # ---- event bus -----------------------------------------------------
+  OrdersBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: orders-bus
+
+  OrderPlacedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref OrdersBus
+      EventPattern:
+        detail-type:
+          - OrderPlaced
+      Targets:
+        - Id: to-processing-queue
+          Arn: !GetAtt OrdersQueue.Arn
+
+  # ---- processing ----------------------------------------------------
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-queue
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+
+  OrdersDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-dlq
+      MessageRetentionPeriod: 1209600
+
+  ProcessOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.process_order
+      CodeUri: src/process_order/
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref OrdersBus
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 10
+
+  # ---- notifications -------------------------------------------------
+  OrderEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: order-events
+
+  NotifyCustomerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.notify
+      CodeUri: src/notify/
+      Timeout: 10
+
+  NotifySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref OrderEventsTopic
+      Endpoint: !GetAtt NotifyCustomerFunction.Arn
+
+  # ---- analytics branch ----------------------------------------------
+  OrderEventsStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: order-events-stream
+      ShardCount: 2
+
+  AnalyticsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: order-analytics
+      Handler: app.handler
+      Runtime: python3.12
+      Timeout: 60
+      Role: !GetAtt AnalyticsRole.Arn
+
+  AnalyticsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: analytics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "kinesis:*"
+                Resource: !GetAtt OrderEventsStream.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt OrdersTable.Arn
+
+  AnalyticsMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt OrderEventsStream.Arn
+      FunctionName: !Ref AnalyticsFunction
+      StartingPosition: LATEST
+      BatchSize: 100
+
+  # ---- fulfilment ----------------------------------------------------
+  FulfilmentStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+        StartAt: ReserveStock
+        States:
+          ReserveStock:
+            Type: Task
+            Resource: !GetAtt ProcessOrderFunction.Arn
+            Next: ChargeCard
+          ChargeCard:
+            Type: Task
+            Resource: arn:aws:states:::http:invoke
+            End: true
+
+  # ---- storage -------------------------------------------------------
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: orders
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+  # ---- observability -------------------------------------------------
+  DlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: orders-dlq-depth
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrdersDlq.QueueName
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Sum
