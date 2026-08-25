@@ -47,3 +47,8 @@ Resources:
       Handler: app.ledger
       Runtime: python3.12
       Timeout: 15
+      EventInvokeConfig:
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt LedgerDlq.Arn

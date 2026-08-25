@@ -25,6 +25,3 @@ Resources:
       Handler: app.enrich
       Runtime: python3.12
       Timeout: 15
-      Policies:
-        - EventBridgePutEventsPolicy:
-            EventBusName: !Ref AuditBus

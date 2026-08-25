@@ -28,6 +28,50 @@ class Severity(StrEnum):
         return {"BLOCK": 0, "WARN": 1, "INFO": 2}[self.value]
 
 
+@dataclass(frozen=True)
+class SourceLocation:
+    """A stable structural location, optionally backed by a YAML line/column."""
+
+    path: str
+    line: int | None = None
+    column: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"path": self.path}
+        if self.line is not None:
+            data["line"] = self.line
+        if self.column is not None:
+            data["column"] = self.column
+        return data
+
+
+@dataclass(frozen=True)
+class Remediation:
+    """A source-aware change recommendation.
+
+    ``automatic`` is deliberately false for changes that require the owner to
+    choose a destination or modify handler code. The scanner must never present
+    a placeholder as a safe, apply-ready patch.
+    """
+
+    location: SourceLocation
+    description: str
+    suggested_value: Any = None
+    automatic: bool = False
+
+    @property
+    def path(self) -> str:
+        return self.location.path
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.location.to_dict(),
+            "description": self.description,
+            "suggested_value": self.suggested_value,
+            "automatic": self.automatic,
+        }
+
+
 @dataclass
 class Finding:
     rule_id: str
@@ -38,6 +82,9 @@ class Finding:
     evidence: dict[str, Any] = field(default_factory=dict)
     patch_hint: str | None = None
     inferred: bool = False
+    source: str | None = None
+    location: SourceLocation | None = None
+    remediations: list[Remediation] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.resources:
@@ -59,4 +106,7 @@ class Finding:
             "evidence": dict(self.evidence),
             "patch_hint": self.patch_hint,
             "inferred": self.inferred,
+            "source": self.source,
+            "location": self.location.to_dict() if self.location else None,
+            "remediations": [remediation.to_dict() for remediation in self.remediations],
         }

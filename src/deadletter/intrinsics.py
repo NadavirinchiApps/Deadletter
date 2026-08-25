@@ -37,8 +37,13 @@ class Reference:
         """The single target, when there is exactly one. Most properties are singular."""
         return next(iter(self.logical_ids)) if len(self.logical_ids) == 1 else None
 
+    @property
+    def configured(self) -> bool:
+        """Whether the template supplied a value, even if it is cross-stack."""
+        return bool(self.logical_ids) or self.literal is not None or self.unresolved
+
     def __bool__(self) -> bool:
-        return bool(self.logical_ids) or self.literal is not None
+        return self.configured
 
 
 def resolve(node: Any) -> Reference:
@@ -67,14 +72,54 @@ def resolve(node: Any) -> Reference:
             body = node["Fn::Sub"]
             template = body[0] if isinstance(body, list) and body else body
             if isinstance(template, str):
-                ids = {m for m in _SUB_TOKEN.findall(template) if not m.startswith("AWS")}
-                return Reference(logical_ids=frozenset(ids), literal=template)
+                variables = body[1] if isinstance(body, list) and len(body) > 1 and isinstance(body[1], dict) else {}
+                ids: set[str] = set()
+                unresolved = False
+                for token in _SUB_TOKEN.findall(template):
+                    if token.startswith("AWS"):
+                        continue
+                    if token in variables:
+                        mapped = resolve(variables[token])
+                        ids.update(mapped.logical_ids)
+                        unresolved = unresolved or mapped.unresolved
+                    else:
+                        ids.add(token)
+                return Reference(logical_ids=frozenset(ids), literal=template, unresolved=unresolved)
+
+        if "Fn::Join" in node:
+            body = node["Fn::Join"]
+            pieces = body[1] if isinstance(body, list) and len(body) > 1 else []
+            return _combine(resolve(piece) for piece in ensure_list(pieces))
+
+        if "Fn::If" in node:
+            body = node["Fn::If"]
+            branches = body[1:] if isinstance(body, list) else []
+            return _combine(resolve(branch) for branch in branches)
 
         if any(k.startswith("Fn::") for k in node):
-            # ImportValue, Select, Join over unresolvable pieces, etc.
-            return Reference(unresolved=True)
+            # ImportValue and transforms may point outside this template. Keep
+            # any nested in-template references, but never claim full resolution.
+            nested = _combine(resolve(value) for value in node.values())
+            return Reference(
+                logical_ids=nested.logical_ids,
+                literal=nested.literal,
+                unresolved=True,
+            )
 
     return Reference()
+
+
+def _combine(references: Iterable[Reference]) -> Reference:
+    ids: set[str] = set()
+    unresolved = False
+    literals: list[str] = []
+    for reference in references:
+        ids.update(reference.logical_ids)
+        unresolved = unresolved or reference.unresolved
+        if reference.literal is not None:
+            literals.append(reference.literal)
+    literal = literals[0] if len(literals) == 1 and not ids else None
+    return Reference(logical_ids=frozenset(ids), literal=literal, unresolved=unresolved)
 
 
 def referenced_ids(node: Any) -> set[str]:

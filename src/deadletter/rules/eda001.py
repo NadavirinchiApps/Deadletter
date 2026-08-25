@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ..findings import Finding, Severity
 from ..model import Kind
-from .base import Rule, register
+from .base import Rule, register, remediation
 
 # AWS's own guidance: visibility timeout should be at least 6x the consumer's
 # timeout, plus the batching window, so a retrying invocation never overlaps
@@ -22,17 +22,50 @@ class EDA001(Rule):
     def check(self, graph):
         for queue in graph.resources(Kind.QUEUE):
             for esm, function in graph.consumers_of(queue.logical_id):
-                required = SAFETY_FACTOR * function.timeout + esm.batching_window
                 actual = queue.visibility_timeout
+                timeout = function.timeout
+                if actual is None or timeout is None:
+                    unknown = []
+                    if actual is None:
+                        unknown.append(f"{queue.logical_id}.VisibilityTimeout")
+                    if timeout is None:
+                        unknown.append(f"{function.logical_id}.Timeout")
+                    yield Finding(
+                        rule_id=self.id,
+                        severity=Severity.WARN,
+                        title=self.title,
+                        message=(
+                            f"WARN: cannot verify the SQS visibility-timeout safety margin for "
+                            f"{queue.logical_id} and {function.logical_id} because "
+                            f"{', '.join(unknown)} is unresolved. Required: resolve the deployment "
+                            f"value and verify VisibilityTimeout >= 6 x Timeout + batching window. "
+                            f"Consequence: an unsafe deployed value can cause duplicate processing."
+                        ),
+                        resources=[queue.logical_id, function.logical_id, esm.logical_id],
+                        evidence={
+                            f"{queue.logical_id}.VisibilityTimeout": queue.raw_prop("VisibilityTimeout"),
+                            f"{function.logical_id}.Timeout": function.raw_prop("Timeout"),
+                            "unresolved": unknown,
+                        },
+                    )
+                    continue
+                required = SAFETY_FACTOR * timeout + esm.batching_window
                 if actual >= required:
                     continue
+                fix = remediation(
+                    graph,
+                    queue,
+                    "VisibilityTimeout",
+                    description=f"Set VisibilityTimeout to at least {required} seconds.",
+                    suggested_value=required,
+                )
                 yield Finding(
                     rule_id=self.id,
                     severity=self.severity,
                     title=self.title,
                     message=(
                         f"BLOCK: {queue.logical_id} VisibilityTimeout is {actual}s, while "
-                        f"{function.logical_id} Timeout is {function.timeout}s with a "
+                        f"{function.logical_id} Timeout is {timeout}s with a "
                         f"{esm.batching_window}s batching window. Required: {required}s. "
                         f"Consequence: a slow or retrying invocation lets the message become "
                         f"visible again before it finishes, so a second consumer processes it "
@@ -41,16 +74,13 @@ class EDA001(Rule):
                     resources=[queue.logical_id, function.logical_id, esm.logical_id],
                     evidence={
                         f"{queue.logical_id}.VisibilityTimeout": actual,
-                        f"{function.logical_id}.Timeout": function.timeout,
+                        f"{function.logical_id}.Timeout": timeout,
                         f"{esm.logical_id}.MaximumBatchingWindowInSeconds": esm.batching_window,
                         "required_minimum": required,
                         "visibility_timeout_declared": queue.visibility_timeout_declared,
                     },
                     patch_hint=(
-                        f"  {queue.logical_id}:\n"
-                        f"    Type: AWS::SQS::Queue\n"
-                        f"    Properties:\n"
-                        f"-     VisibilityTimeout: {actual}\n"
-                        f"+     VisibilityTimeout: {required}"
+                        f"Set {fix.path} to {required} (VisibilityTimeout: {required})."
                     ),
+                    remediations=[fix],
                 )

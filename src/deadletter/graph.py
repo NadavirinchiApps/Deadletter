@@ -1,26 +1,8 @@
 """Resources -> directed event-flow graph.
 
-This is the differentiator. Per-resource linters already tell you a queue has
-no DLQ. Only a graph can tell you that *this* queue's visibility timeout is
-too short for *that* function's timeout, because only a graph knows the two
-are connected.
-
-Nodes are logical IDs carrying their typed resource. Edges are deliveries,
-each tagged with the mechanism that carries them:
-
-    poll        queue/stream/table-stream -> function   (event source mapping)
-    rule_target bus -> target                           (EventBridge rule)
-    subscribe   topic -> endpoint                       (SNS subscription)
-    invoke      api -> function
-    publish     function -> bus                         (inferred from IAM)
-    writes      function -> table/database              (inferred from IAM/env)
-    redrive     queue -> dead-letter queue
-    dlq         function -> dead-letter queue/topic
-    on_failure  esm/function -> failure destination
-
-`publish` and `writes` are inferred rather than declared, so they carry
-`inferred=True`. Rules that lean on them must downgrade severity accordingly —
-a BLOCK built on a guess is how a scanner loses a prospect's trust.
+The graph is Deadletter's differentiator: rules reason about connected AWS
+resources rather than linting one resource at a time. IAM-derived edges retain
+their evidence and are always marked inferred.
 """
 
 from __future__ import annotations
@@ -31,13 +13,33 @@ from typing import Any, Iterator
 import networkx as nx
 
 from . import model as m
+from .findings import SourceLocation
 from .intrinsics import ensure_list, referenced_ids, resolve
 from .parse import Template
 
 DELIVERY_EDGES = frozenset({"poll", "rule_target", "subscribe", "invoke"})
 FAILURE_EDGES = frozenset({"redrive", "dlq", "on_failure"})
 
-_PUBLISH_ACTIONS = ("events:putevents", "events:*")
+_SAM_POLICY_ACTIONS: dict[str, tuple[str, ...]] = {
+    "EventBridgePutEventsPolicy": ("events:putevents",),
+    "SNSPublishMessagePolicy": ("sns:publish",),
+    "DynamoDBCrudPolicy": ("dynamodb:*",),
+    "DynamoDBWritePolicy": (
+        "dynamodb:batchwriteitem",
+        "dynamodb:deleteitem",
+        "dynamodb:putitem",
+        "dynamodb:transactwriteitems",
+        "dynamodb:updateitem",
+    ),
+}
+
+_DYNAMODB_WRITE_ACTIONS = {
+    "dynamodb:batchwriteitem",
+    "dynamodb:deleteitem",
+    "dynamodb:putitem",
+    "dynamodb:transactwriteitems",
+    "dynamodb:updateitem",
+}
 
 
 @dataclass
@@ -45,7 +47,7 @@ class Edge:
     source: str
     target: str
     kind: str
-    via: str | None = None  # logical ID of the ESM / rule / subscription carrying it
+    via: str | None = None
     inferred: bool = False
     props: dict[str, Any] = field(default_factory=dict)
 
@@ -63,6 +65,8 @@ class EventGraph:
             self.g.add_node(resource.logical_id, resource=resource)
 
         for resource in list(self.template):
+            if resource.kind is m.Kind.API and resource.synthetic and resource.origin:
+                self._add_api_event(resource)
             match resource:
                 case m.EventSourceMapping():
                     self._add_esm(resource)
@@ -74,15 +78,13 @@ class EventGraph:
                     self._add_redrive(resource)
                 case m.Function():
                     self._add_function_edges(resource)
+                case m.EventInvokeConfig():
+                    self._add_event_invoke_config(resource)
                 case _:
                     pass
 
     def _add(self, source: Any, target: Any, kind: str, **kw: Any) -> None:
-        """Add an edge only when both ends resolve to resources in this template.
-
-        Cross-stack and imported references are dropped on purpose: a finding
-        we cannot show both sides of is a finding we cannot defend.
-        """
+        """Add an edge only when both ends resolve inside this template."""
         source_id = source.logical_id if isinstance(source, m.Resource) else source
         target_id = target.logical_id if isinstance(target, m.Resource) else target
         if not source_id or not target_id or source_id == target_id:
@@ -100,7 +102,7 @@ class EventGraph:
             self._add(source, target, "poll", via=esm.logical_id)
         failure = self.template.resolve_ref(esm.on_failure)
         if failure is not None:
-            self._add(esm.logical_id if esm.logical_id in self.g else target, failure, "on_failure", via=esm.logical_id)
+            self._add(esm, failure, "on_failure", via=esm.logical_id)
 
     def _add_rule(self, rule: m.Rule) -> None:
         bus = self.template.resolve_ref(rule.bus)
@@ -113,17 +115,26 @@ class EventGraph:
                 "retry_policy": target_spec.get("RetryPolicy"),
                 "target_index": index,
             }
-            if bus is not None:
+            if bus is not None and not rule.scheduled:
                 self._add(bus, target, "rule_target", via=rule.logical_id, props=props)
             else:
-                # default bus: rule has no node of its own, hang the edge off the rule
-                self._add(rule.logical_id, target, "rule_target", via=rule.logical_id, props=props)
+                # A schedule is a time source; publishing to a bus cannot retrigger it.
+                self._add(rule, target, "rule_target", via=rule.logical_id, props=props)
 
     def _add_subscription(self, subscription: m.Subscription) -> None:
         topic = self.template.resolve_ref(subscription.topic)
         endpoint = self.template.resolve_ref(subscription.endpoint)
         if topic is not None and endpoint is not None:
-            self._add(topic, endpoint, "subscribe", via=subscription.logical_id)
+            self._add(
+                topic,
+                endpoint,
+                "subscribe",
+                via=subscription.logical_id,
+                props={
+                    "redrive_policy": subscription.prop("RedrivePolicy"),
+                    "has_redrive": subscription.has_redrive,
+                },
+            )
 
     def _add_redrive(self, queue: m.Queue) -> None:
         dlq = self.template.resolve_ref(queue.redrive_target)
@@ -138,45 +149,101 @@ class EventGraph:
         if failure is not None:
             self._add(function, failure, "on_failure")
 
-        permitted, mentioned = self._iam_referenced(function)
-        for target_id in permitted | mentioned:
-            target = self.template.get(target_id)
-            if target is None:
-                continue
-            if target.kind in (m.Kind.TABLE, m.Kind.DATABASE):
-                # A write edge requires permission. An environment variable naming
-                # the table proves only that someone pasted a config value —
-                # Globals blocks hand it to every function in the stack.
-                if target_id not in permitted:
+        for actions, target_ids, basis in self._permissions(function):
+            for target_id in target_ids:
+                target = self.template.get(target_id)
+                if target is None:
                     continue
-                self._add(function, target, "writes", inferred=True, props={"basis": "iam-policy"})
-            elif target.kind is m.Kind.BUS and target_id in permitted and self._can_publish(function):
-                self._add(function, target, "publish", inferred=True, props={"basis": "iam-policy"})
+                props = {"basis": "iam-policy", "policy_source": basis, "actions": sorted(actions)}
+                if target.kind in (m.Kind.TABLE, m.Kind.DATABASE) and self._can_write(actions, target.kind):
+                    self._add(function, target, "writes", inferred=True, props=props)
+                elif target.kind is m.Kind.BUS and self._action_allowed(actions, "events", "putevents"):
+                    self._add(function, target, "publish", inferred=True, props=props)
+                elif target.kind is m.Kind.TOPIC and self._action_allowed(actions, "sns", "publish"):
+                    self._add(function, target, "publish", inferred=True, props=props)
 
-        api = self.template.get(f"{function.logical_id}#Api")
-        if api is not None:
-            self._add(api, function, "invoke")
-
-    def _iam_referenced(self, function: m.Function) -> tuple[set[str], set[str]]:
-        """(permission-backed, merely-mentioned) logical IDs for a function.
-
-        The split matters: `Globals: Environment` gives every function in the
-        stack the same variables, so an environment mention is not evidence
-        that this function touches that resource. Permissions are.
-        """
-        permitted = referenced_ids(function.prop("Policies"))
+    def _permissions(self, function: m.Function) -> list[tuple[set[str], set[str], str]]:
+        """Return action/resource pairs without mixing separate IAM statements."""
+        policies = list(ensure_list(function.prop("Policies")))
         role = self.template.resolve_ref(function.ref("Role"))
         if isinstance(role, m.Role):
-            permitted |= referenced_ids(role.prop("Policies"))
-        mentioned = referenced_ids(function.prop("Environment")) - permitted
-        return permitted, mentioned
+            policies.extend(ensure_list(role.prop("Policies")))
 
-    def _can_publish(self, function: m.Function) -> bool:
-        blob = str(function.prop("Policies")).lower()
-        role = self.template.resolve_ref(function.ref("Role"))
-        if isinstance(role, m.Role):
-            blob += str(role.prop("Policies")).lower()
-        return any(action in blob for action in _PUBLISH_ACTIONS) or "eventbridgeputeventspolicy" in blob
+        permissions: list[tuple[set[str], set[str], str]] = []
+        for policy in policies:
+            if not isinstance(policy, dict):
+                continue
+            if len(policy) == 1:
+                template_name, config = next(iter(policy.items()))
+                template_actions = _SAM_POLICY_ACTIONS.get(str(template_name))
+                if template_actions:
+                    permissions.append(
+                        (
+                            set(template_actions),
+                            self._policy_target_ids(config),
+                            f"sam-policy:{template_name}",
+                        )
+                    )
+                    continue
+
+            document = policy.get("PolicyDocument", policy)
+            if not isinstance(document, dict):
+                continue
+            for statement in ensure_list(document.get("Statement")):
+                if not isinstance(statement, dict) or str(statement.get("Effect", "Allow")).lower() != "allow":
+                    continue
+                actions = {
+                    action.lower()
+                    for action in ensure_list(statement.get("Action"))
+                    if isinstance(action, str)
+                }
+                targets = self._policy_target_ids(statement.get("Resource"))
+                if actions and targets:
+                    permissions.append((actions, targets, "iam-policy"))
+        return permissions
+
+    def _policy_target_ids(self, node: Any) -> set[str]:
+        """Resolve logical references and literal names/ARNs in a policy resource."""
+        targets = set(referenced_ids(node))
+
+        def walk(value: Any) -> None:
+            reference = resolve(value)
+            target = self.template.resolve_ref(reference)
+            if target is not None:
+                targets.add(target.logical_id)
+            if isinstance(value, dict):
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(node)
+        return targets
+
+    @staticmethod
+    def _action_allowed(actions: set[str], service: str, action: str) -> bool:
+        return "*" in actions or f"{service}:*" in actions or f"{service}:{action}" in actions
+
+    @classmethod
+    def _can_write(cls, actions: set[str], kind: m.Kind) -> bool:
+        if kind is m.Kind.TABLE:
+            return bool(actions & _DYNAMODB_WRITE_ACTIONS) or "*" in actions or "dynamodb:*" in actions
+        return "*" in actions or "rds-data:*" in actions or bool(
+            actions & {"rds-data:executestatement", "rds-data:batchexecutestatement"}
+        )
+
+    def _add_event_invoke_config(self, config: m.EventInvokeConfig) -> None:
+        destination = self.template.resolve_ref(config.on_failure)
+        if destination is not None:
+            self._add(config, destination, "on_failure", via=config.logical_id)
+
+    def _add_api_event(self, event: m.Resource) -> None:
+        function = self.template.get(event.origin)
+        if not isinstance(function, m.Function):
+            return
+        api = self.template.resolve_ref(event.ref("ApiId", "RestApiId"))
+        self._add(api or event, function, "invoke", via=event.logical_id)
 
     # -- queries rules use --------------------------------------------
 
@@ -200,13 +267,12 @@ class EventGraph:
                 )
 
     def out_edges(self, logical_id: str, kind: str | None = None) -> list[Edge]:
-        return [e for e in self.edges(kind) if e.source == logical_id]
+        return [edge for edge in self.edges(kind) if edge.source == logical_id]
 
     def in_edges(self, logical_id: str, kind: str | None = None) -> list[Edge]:
-        return [e for e in self.edges(kind) if e.target == logical_id]
+        return [edge for edge in self.edges(kind) if edge.target == logical_id]
 
     def consumers_of(self, logical_id: str) -> list[tuple[m.EventSourceMapping, m.Function]]:
-        """Every (event source mapping, consuming function) pair for a queue/stream."""
         pairs = []
         for edge in self.out_edges(logical_id, "poll"):
             esm = self.template.get(edge.via)
@@ -216,15 +282,28 @@ class EventGraph:
         return pairs
 
     def async_invokers_of(self, logical_id: str) -> list[Edge]:
-        """Edges that invoke a function asynchronously — the paths where a missing
-        failure destination means events vanish without trace."""
-        return [e for e in self.in_edges(logical_id) if e.kind in ("rule_target", "subscribe")]
+        return [edge for edge in self.in_edges(logical_id) if edge.kind in ("rule_target", "subscribe")]
 
     def has_failure_path(self, logical_id: str) -> bool:
-        return any(e.kind in FAILURE_EDGES for e in self.out_edges(logical_id))
+        return any(edge.kind in FAILURE_EDGES for edge in self.out_edges(logical_id))
+
+    def invoke_configs_for(self, function_id: str) -> list[m.EventInvokeConfig]:
+        configs: list[m.EventInvokeConfig] = []
+        for resource in self.resources(m.Kind.INVOKE_CONFIG):
+            if isinstance(resource, m.EventInvokeConfig):
+                target = self.template.resolve_ref(resource.function)
+                if target is not None and target.logical_id == function_id:
+                    configs.append(resource)
+        return configs
+
+    def source_location(self, resource: m.Resource | str, *parts: str | int) -> SourceLocation:
+        item = self.template.get(resource) if isinstance(resource, str) else resource
+        path = item.property_path(*parts) if item is not None else ()
+        line, column = self.template.location(path)
+        pointer = "/" + "/".join(_pointer_escape(part) for part in path) if path else ""
+        return SourceLocation(path=pointer, line=line, column=column)
 
     def to_mermaid(self) -> str:
-        """Architecture diagram for the report. Every paid deliverable opens with this."""
         shapes = {
             m.Kind.FUNCTION: "[{}]",
             m.Kind.QUEUE: "[/{}/]",
@@ -236,20 +315,25 @@ class EventGraph:
             m.Kind.API: "([{}])",
         }
         lines = ["graph LR"]
-        drawn = {e.source for e in self.edges()} | {e.target for e in self.edges()}
+        drawn = {edge.source for edge in self.edges()} | {edge.target for edge in self.edges()}
         for logical_id in sorted(drawn):
             resource = self.node(logical_id)
             if resource is None:
                 continue
             shape = shapes.get(resource.kind, "[{}]")
             safe = logical_id.replace("#", "_")
-            lines.append(f"    {safe}{shape.format(logical_id)}")
+            label = resource.name_hint or logical_id
+            lines.append(f"    {safe}{shape.format(label)}")
         for edge in self.edges():
             style = "-.->" if edge.kind in FAILURE_EDGES or edge.inferred else "-->"
             lines.append(
                 f"    {edge.source.replace('#', '_')} {style}|{edge.kind}| {edge.target.replace('#', '_')}"
             )
         return "\n".join(lines)
+
+
+def _pointer_escape(value: str | int) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
 
 
 def build(template: Template) -> EventGraph:

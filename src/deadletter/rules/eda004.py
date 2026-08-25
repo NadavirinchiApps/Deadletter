@@ -1,21 +1,12 @@
-"""EDA004 — recursive event loop through a bus or topic.
-
-Severity is graded rather than fixed, deliberately. A cycle through a rule
-with *no* filtering is a near-certain loop and blocks. A cycle through a rule
-that filters on source or detail-type can only close if the function re-emits
-a matching event, which no static analysis can prove — that is a WARN, not a
-BLOCK. Firing BLOCK on every filtered cycle would cry wolf on ordinary
-templates, and a false BLOCK in front of a prospect costs more than a missed
-rule.
-"""
+"""EDA004 - recursive event loop through an EventBridge bus or SNS topic."""
 
 from __future__ import annotations
 
 import networkx as nx
 
 from ..findings import Finding, Severity
-from ..model import Kind
-from .base import Rule, register
+from ..model import Kind, Rule as EventRule
+from .base import Rule, register, remediation
 
 CYCLE_EDGES = {"poll", "rule_target", "subscribe", "invoke", "publish"}
 FILTER_KEYS = ("source", "detail-type", "detail")
@@ -26,86 +17,140 @@ class EDA004(Rule):
     id = "EDA004"
     severity = Severity.BLOCK
     title = "Recursive event loop"
-    condition = "Any event that re-enters the bus it was delivered from."
+    condition = "Any event that re-enters the hub it was delivered from."
 
     def check(self, graph):
-        loop_graph = nx.DiGraph()
-        carriers: dict[tuple[str, str], str | None] = {}
-        for edge in graph.edges():
-            if edge.kind in CYCLE_EDGES:
-                loop_graph.add_edge(edge.source, edge.target)
-                carriers.setdefault((edge.source, edge.target), edge.via)
+        """Emit at most one representative finding per strongly connected component.
 
-        for cycle in nx.simple_cycles(loop_graph):
-            hubs = [n for n in cycle if graph.node(n) and graph.node(n).kind in (Kind.BUS, Kind.TOPIC)]
+        Enumerating every simple cycle is exponential on dense templates. Strongly
+        connected components identify the same risk in linear time. A filter only
+        downgrades the result: without emitted event values, no template-only scan
+        can prove that an ``anything-but`` clause excludes the producer.
+        """
+        loop_graph = nx.DiGraph()
+        carriers: dict[tuple[str, str], list[str]] = {}
+        for edge in graph.edges():
+            if edge.kind not in CYCLE_EDGES:
+                continue
+            loop_graph.add_edge(edge.source, edge.target)
+            if edge.via:
+                carriers.setdefault((edge.source, edge.target), []).append(edge.via)
+
+        components = [
+            component
+            for component in nx.strongly_connected_components(loop_graph)
+            if len(component) > 1
+        ]
+        for component in sorted(components, key=lambda nodes: sorted(nodes)):
+            hubs = sorted(
+                node
+                for node in component
+                if graph.node(node) and graph.node(node).kind in (Kind.BUS, Kind.TOPIC)
+            )
             if not hubs:
-                continue  # a cycle with no fan-out hub cannot amplify
+                continue
             hub = hubs[0]
-            if self._proves_exclusion(graph, cycle, carriers):
-                continue  # anything-but is the only clause that statically closes the loop
-            filters = self._filters_on(graph, cycle, carriers)
-            severity = Severity.WARN if filters else Severity.BLOCK
-            verdict = "WARN" if filters else "BLOCK"
+            cycle = _representative_cycle(loop_graph, component, hub)
+            if not cycle:
+                continue
+
+            routes = [
+                edge
+                for edge in graph.edges()
+                if edge.kind in ("rule_target", "subscribe")
+                and edge.source in component
+                and edge.target in component
+            ]
+            rules = self._rules_in_component(graph, component)
+            filters = {
+                key
+                for rule in rules
+                for key in FILTER_KEYS
+                if key in rule.pattern
+            }
+            all_routes_filtered = bool(routes) and all(
+                edge.kind == "rule_target"
+                and isinstance(graph.template.get(edge.via), EventRule)
+                and any(
+                    key in graph.template.get(edge.via).pattern
+                    for key in FILTER_KEYS
+                )
+                for edge in routes
+            )
+            severity = Severity.WARN if all_routes_filtered else Severity.BLOCK
+            verdict = str(severity)
             path = " -> ".join([*cycle, cycle[0]])
             guard = (
-                f"the rule pattern filters on {', '.join(sorted(filters))}"
+                f"rule patterns filter on {', '.join(sorted(filters))}, but the emitted values are unknown"
                 if filters
-                else "the rule pattern applies no source or detail-type filter"
+                else "at least one route has no source, detail-type, or detail filter"
+            )
+
+            fixes = [
+                remediation(
+                    graph,
+                    rule,
+                    "Pattern" if rule.raw_prop("Pattern") is not None else "EventPattern",
+                    description=(
+                        "Add a producer-specific exclusion that is verified against the values "
+                        "the consumer publishes, or remove its publish permission."
+                    ),
+                    suggested_value={
+                        "source": [{"anything-but": "REPLACE_WITH_CONSUMER_EMITTED_SOURCE"}]
+                    },
+                )
+                for rule in rules
+            ]
+            carrier_names = sorted(
+                {
+                    carrier
+                    for pair, names in carriers.items()
+                    if pair[0] in component and pair[1] in component
+                    for carrier in names
+                }
             )
             yield Finding(
                 rule_id=self.id,
                 severity=severity,
                 title=self.title,
                 message=(
-                    f"{verdict}: events delivered from {hub} can return to it via "
-                    f"{path}, while {guard}. Required: a filter excluding the "
-                    f"consumer's own emissions, or removal of the return edge. "
-                    f"Consequence: each event can re-trigger the cycle, multiplying "
-                    f"invocations and cost without bound until throttling stops it."
+                    f"{verdict}: events delivered from {hub} can return to it via {path}, while "
+                    f"{guard}. Required: verify a filter excludes the consumer's own emissions, "
+                    f"or remove the return edge. Consequence: each matching event can re-trigger "
+                    f"the cycle, multiplying invocations and cost until throttling stops it."
                 ),
                 resources=list(dict.fromkeys(cycle)),
                 evidence={
                     "cycle": path,
                     "hub": hub,
                     "pattern_filters": sorted(filters) or None,
-                    "carriers": [c for c in (carriers.get(pair) for pair in zip(cycle, cycle[1:] + cycle[:1])) if c],
+                    "carriers": carrier_names,
+                    "analysis": "strongly-connected-component",
                 },
                 inferred=True,
                 patch_hint=(
-                    "  # exclude the consumer's own source from the rule pattern\n"
-                    "    EventPattern:\n"
-                    "      source:\n"
-                    "+       - anything-but: <consumer source>"
+                    f"Verify and update {fixes[0].path}." if fixes else "Remove the inferred publish return edge."
                 ),
+                remediations=fixes,
             )
 
-    def _filters_on(self, graph, cycle, carriers) -> set[str]:
-        """Which pattern keys narrow the rules involved in this cycle."""
-        found: set[str] = set()
-        pairs = list(zip(cycle, cycle[1:] + cycle[:1]))
-        for pair in pairs:
-            rule = graph.template.get(carriers.get(pair))
-            if rule is None or rule.kind is not Kind.RULE:
+    @staticmethod
+    def _rules_in_component(graph, component: set[str]) -> list[EventRule]:
+        rules: dict[str, EventRule] = {}
+        for edge in graph.edges("rule_target"):
+            if edge.source not in component or edge.target not in component or not edge.via:
                 continue
-            found |= {k for k in FILTER_KEYS if k in getattr(rule, "pattern", {})}
-        return found
-
-    def _proves_exclusion(self, graph, cycle, carriers) -> bool:
-        """An `anything-but` clause is the only thing in an EventPattern that
-        proves, without knowing what the consumer emits, that its own events
-        cannot match. Everything else merely narrows the pattern."""
-        for pair in zip(cycle, cycle[1:] + cycle[:1]):
-            rule = graph.template.get(carriers.get(pair))
-            if rule is None or rule.kind is not Kind.RULE:
-                continue
-            if _has_anything_but(getattr(rule, "pattern", {})):
-                return True
-        return False
+            carrier = graph.template.get(edge.via)
+            if isinstance(carrier, EventRule):
+                rules[carrier.logical_id] = carrier
+        return [rules[name] for name in sorted(rules)]
 
 
-def _has_anything_but(node) -> bool:
-    if isinstance(node, dict):
-        return "anything-but" in node or any(_has_anything_but(v) for v in node.values())
-    if isinstance(node, list):
-        return any(_has_anything_but(v) for v in node)
-    return False
+def _representative_cycle(graph: nx.DiGraph, component: set[str], hub: str) -> list[str]:
+    subgraph = graph.subgraph(component)
+    for successor in sorted(subgraph.successors(hub)):
+        try:
+            return [hub, *nx.shortest_path(subgraph, successor, hub)[:-1]]
+        except nx.NetworkXNoPath:
+            continue
+    return []

@@ -31,6 +31,7 @@ class Kind(StrEnum):
     ALARM = "alarm"
     ROLE = "role"
     API = "api"
+    INVOKE_CONFIG = "invoke_config"
     UNKNOWN = "unknown"
 
 
@@ -48,14 +49,31 @@ class Resource:
     cfn_type: str
     kind: Kind
     props: dict[str, Any] = field(default_factory=dict)
+    raw_props: dict[str, Any] | None = None
     synthetic: bool = False  # derived from a SAM Events block, not written literally
     origin: str | None = None  # logical ID of the resource that implied it
+    source_path: tuple[str | int, ...] = field(default_factory=tuple)
+    condition: str | None = None
+    condition_value: bool | None = True
 
     def prop(self, *names: str, default: Any = None) -> Any:
-        return first(*(self.props.get(n) for n in names)) if names else default
+        if not names:
+            return default
+        value = first(*(self.props.get(n) for n in names))
+        return default if value is None else value
+
+    def raw_prop(self, *names: str, default: Any = None) -> Any:
+        props = self.raw_props if self.raw_props is not None else self.props
+        if not names:
+            return default
+        value = first(*(props.get(n) for n in names))
+        return default if value is None else value
 
     def ref(self, *names: str) -> Reference:
         return resolve(self.prop(*names))
+
+    def property_path(self, *parts: str | int) -> tuple[str | int, ...]:
+        return (*self.source_path, *parts)
 
     @property
     def name_hint(self) -> str | None:
@@ -67,8 +85,9 @@ class Resource:
 @dataclass
 class Function(Resource):
     @property
-    def timeout(self) -> int:
-        return as_int(self.prop("Timeout"), LAMBDA_DEFAULT_TIMEOUT) or LAMBDA_DEFAULT_TIMEOUT
+    def timeout(self) -> int | None:
+        value = self.prop("Timeout")
+        return LAMBDA_DEFAULT_TIMEOUT if value is None else as_int(value)
 
     @property
     def timeout_declared(self) -> bool:
@@ -111,8 +130,9 @@ class Function(Resource):
 @dataclass
 class Queue(Resource):
     @property
-    def visibility_timeout(self) -> int:
-        return as_int(self.prop("VisibilityTimeout"), SQS_DEFAULT_VISIBILITY_TIMEOUT) or SQS_DEFAULT_VISIBILITY_TIMEOUT
+    def visibility_timeout(self) -> int | None:
+        value = self.prop("VisibilityTimeout")
+        return SQS_DEFAULT_VISIBILITY_TIMEOUT if value is None else as_int(value)
 
     @property
     def visibility_timeout_declared(self) -> bool:
@@ -145,7 +165,18 @@ class EventSourceMapping(Resource):
 
     @property
     def batch_size(self) -> int | None:
-        return as_int(self.prop("BatchSize"))
+        value = self.prop("BatchSize")
+        if value is None:
+            if self.source_kind is Kind.QUEUE:
+                return 10
+            if self.source_kind in (Kind.STREAM, Kind.TABLE):
+                return 100
+            return None
+        return as_int(value)
+
+    @property
+    def batch_size_declared(self) -> bool:
+        return self.prop("BatchSize") is not None
 
     @property
     def batching_window(self) -> int:
@@ -175,6 +206,10 @@ class EventSourceMapping(Resource):
         return as_int(self.prop("MaximumRetryAttempts"))
 
     @property
+    def maximum_record_age(self) -> int | None:
+        return as_int(self.prop("MaximumRecordAgeInSeconds"))
+
+    @property
     def on_failure(self) -> Reference:
         cfg = self.prop("DestinationConfig")
         if isinstance(cfg, dict) and isinstance(cfg.get("OnFailure"), dict):
@@ -197,6 +232,13 @@ class Rule(Resource):
     def targets(self) -> list[dict[str, Any]]:
         return [t for t in ensure_list(self.prop("Targets")) if isinstance(t, dict)]
 
+    @property
+    def scheduled(self) -> bool:
+        return self.prop("ScheduleExpression") is not None or self.prop("DeadletterEventType") in (
+            "Schedule",
+            "ScheduleV2",
+        )
+
 
 @dataclass
 class Subscription(Resource):
@@ -211,6 +253,33 @@ class Subscription(Resource):
     @property
     def has_redrive(self) -> bool:
         return self.prop("RedrivePolicy") is not None
+
+    @property
+    def redrive_target(self) -> Reference:
+        policy = self.prop("RedrivePolicy")
+        if isinstance(policy, dict):
+            return resolve(policy.get("deadLetterTargetArn"))
+        return Reference()
+
+
+@dataclass
+class EventInvokeConfig(Resource):
+    function: Reference = field(default_factory=Reference)
+
+    @property
+    def on_failure(self) -> Reference:
+        destination = self.prop("DestinationConfig")
+        if isinstance(destination, dict) and isinstance(destination.get("OnFailure"), dict):
+            return resolve(destination["OnFailure"].get("Destination"))
+        return Reference()
+
+    @property
+    def max_event_age(self) -> int | None:
+        return as_int(self.prop("MaximumEventAgeInSeconds"))
+
+    @property
+    def max_retry_attempts(self) -> int | None:
+        return as_int(self.prop("MaximumRetryAttempts"))
 
 
 @dataclass

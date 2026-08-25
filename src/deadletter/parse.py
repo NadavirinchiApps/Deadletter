@@ -30,6 +30,7 @@ _TYPE_KIND: dict[str, m.Kind] = {
     "AWS::Events::EventBus": m.Kind.BUS,
     "AWS::Events::Rule": m.Kind.RULE,
     "AWS::Lambda::EventSourceMapping": m.Kind.ESM,
+    "AWS::Lambda::EventInvokeConfig": m.Kind.INVOKE_CONFIG,
     "AWS::StepFunctions::StateMachine": m.Kind.STATE_MACHINE,
     "AWS::Serverless::StateMachine": m.Kind.STATE_MACHINE,
     "AWS::Kinesis::Stream": m.Kind.STREAM,
@@ -56,6 +57,7 @@ _CLASS: dict[m.Kind, type[m.Resource]] = {
     m.Kind.STREAM: m.Stream,
     m.Kind.TABLE: m.Table,
     m.Kind.ROLE: m.Role,
+    m.Kind.INVOKE_CONFIG: m.EventInvokeConfig,
 }
 
 # SAM event type -> (source property name, kind of the thing it polls)
@@ -71,9 +73,15 @@ _BUS_EVENTS = {"EventBridgeRule", "CloudWatchEvent", "Schedule", "ScheduleV2"}
 class Template:
     """A parsed template: resources by logical ID, plus lookup helpers."""
 
-    def __init__(self, resources: dict[str, m.Resource], source: str | None = None) -> None:
+    def __init__(
+        self,
+        resources: dict[str, m.Resource],
+        source: str | None = None,
+        locations: dict[tuple[str | int, ...], tuple[int, int]] | None = None,
+    ) -> None:
         self.resources = resources
         self.source = source
+        self.locations = locations or {}
 
     def __iter__(self):
         return iter(self.resources.values())
@@ -86,18 +94,36 @@ class Template:
 
     def resolve_ref(self, ref) -> m.Resource | None:
         """Reference -> resource, falling back to literal-ARN name matching."""
-        for logical_id in ref.logical_ids:
-            found = self.resources.get(logical_id)
-            if found is not None:
-                return found
+        candidates = {
+            logical_id: self.resources[logical_id]
+            for logical_id in ref.logical_ids
+            if logical_id in self.resources
+        }
+        if len(candidates) == 1:
+            return next(iter(candidates.values()))
+        if len(candidates) > 1:
+            return None  # a singular property must never pick a target arbitrarily
         if ref.literal:
             from .intrinsics import name_from_arn
 
             name = name_from_arn(ref.literal) or ref.literal
-            for resource in self.resources.values():
-                if resource.name_hint and resource.name_hint == name:
-                    return resource
+            matches = [
+                resource
+                for resource in self.resources.values()
+                if resource.name_hint and resource.name_hint == name
+            ]
+            if len(matches) == 1:
+                return matches[0]
         return None
+
+    def location(self, path: tuple[str | int, ...]) -> tuple[int | None, int | None]:
+        """Line/column for a path, falling back to its nearest existing parent."""
+        current = path
+        while current:
+            if current in self.locations:
+                return self.locations[current]
+            current = current[:-1]
+        return self.locations.get((), (None, None))
 
 
 def load(path: str | Path) -> Template:
@@ -106,28 +132,55 @@ def load(path: str | Path) -> Template:
 
 
 def loads(text: str, source: str | None = None) -> Template:
-    raw = _decode(text)
+    raw, locations = _decode(text)
     if not isinstance(raw, dict):
         raise ValueError("template did not parse to a mapping")
-    return Template(_build(raw), source=source)
+    return Template(_build(raw), source=source, locations=locations)
 
 
-def _decode(text: str) -> Any:
+def _decode(text: str) -> tuple[Any, dict[tuple[str | int, ...], tuple[int, int]]]:
     """cfn-lint's decoder first (handles short-form intrinsics and duplicate keys),
     cfn-flip second, plain JSON last."""
     try:
         from cfnlint.decode.cfn_yaml import loads as cfn_loads
 
-        return _plain(cfn_loads(text))
-    except Exception:
-        pass
+        marked = cfn_loads(text)
+        locations: dict[tuple[str | int, ...], tuple[int, int]] = {}
+        _collect_locations(marked, (), locations)
+        return _plain(marked), locations
+    except Exception as cfn_error:
+        errors = [f"CloudFormation YAML: {cfn_error}"]
     try:
         import cfn_flip
 
-        return _plain(cfn_flip.load(text)[0])
-    except Exception:
-        pass
-    return json.loads(text)
+        return _plain(cfn_flip.load(text)[0]), {}
+    except Exception as flip_error:
+        errors.append(f"YAML fallback: {flip_error}")
+    try:
+        return json.loads(text), {}
+    except Exception as json_error:
+        errors.append(f"JSON: {json_error}")
+        raise ValueError("unable to parse template; " + "; ".join(errors)) from json_error
+
+
+def _collect_locations(
+    node: Any,
+    path: tuple[str | int, ...],
+    locations: dict[tuple[str | int, ...], tuple[int, int]],
+) -> None:
+    mark = getattr(node, "start_mark", None)
+    if mark is not None:
+        locations.setdefault(path, (mark.line + 1, mark.column + 1))
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child_path = (*path, str(key))
+            key_mark = getattr(key, "start_mark", None)
+            if key_mark is not None:
+                locations[child_path] = (key_mark.line + 1, key_mark.column + 1)
+            _collect_locations(value, child_path, locations)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            _collect_locations(value, (*path, index), locations)
 
 
 def _plain(node: Any) -> Any:
@@ -151,49 +204,84 @@ def _plain(node: Any) -> Any:
 def _build(raw: dict[str, Any]) -> dict[str, m.Resource]:
     globals_block = raw.get("Globals") if isinstance(raw.get("Globals"), dict) else {}
     function_globals = globals_block.get("Function", {}) if isinstance(globals_block, dict) else {}
+    parameter_defaults = _parameter_defaults(raw)
+    condition_values = _condition_values(raw, parameter_defaults)
     resources: dict[str, m.Resource] = {}
 
     for logical_id, body in iter_dict(raw.get("Resources")):
         if not isinstance(body, dict):
             continue
         cfn_type = str(body.get("Type", ""))
-        props = body.get("Properties") if isinstance(body.get("Properties"), dict) else {}
+        condition = body.get("Condition") if isinstance(body.get("Condition"), str) else None
+        condition_value = condition_values.get(condition) if condition else True
+        if condition_value is False:
+            continue
+        raw_props = body.get("Properties") if isinstance(body.get("Properties"), dict) else {}
         kind = _TYPE_KIND.get(cfn_type, m.Kind.UNKNOWN)
 
-        if kind is m.Kind.FUNCTION and isinstance(function_globals, dict):
-            props = {**function_globals, **props}  # explicit props win over Globals
+        if cfn_type == "AWS::Serverless::Function" and isinstance(function_globals, dict):
+            raw_props = _sam_merge(function_globals, raw_props)
 
-        resources[logical_id] = _make(logical_id, cfn_type, kind, props)
+        props = _resolve_parameter_defaults(raw_props, parameter_defaults)
+        resources[logical_id] = _make(
+            logical_id,
+            cfn_type,
+            kind,
+            props,
+            raw_props=raw_props,
+            source_path=("Resources", logical_id, "Properties"),
+            condition=condition,
+            condition_value=condition_value,
+        )
 
     # Second pass: SAM Events need the full resource map to exist first.
     synthetic: dict[str, m.Resource] = {}
     for logical_id, body in iter_dict(raw.get("Resources")):
         if isinstance(body, dict) and str(body.get("Type")) == "AWS::Serverless::Function":
-            props = body.get("Properties") if isinstance(body.get("Properties"), dict) else {}
-            synthetic.update(_expand_sam_events(logical_id, props))
+            function = resources.get(logical_id)
+            if function is not None:
+                synthetic.update(
+                    _expand_sam_events(
+                        logical_id,
+                        function.props,
+                        function.raw_props or function.props,
+                        condition=function.condition,
+                        condition_value=function.condition_value,
+                    )
+                )
 
     resources.update(synthetic)
+    _attach_default_event_bus(resources)
     return resources
 
 
 def _make(logical_id: str, cfn_type: str, kind: m.Kind, props: dict[str, Any], **extra: Any) -> m.Resource:
     cls = _CLASS.get(kind, m.Resource)
     resource = cls(logical_id=logical_id, cfn_type=cfn_type, kind=kind, props=props, **extra)
-    if isinstance(resource, m.EventSourceMapping) and not extra:
+    if isinstance(resource, m.EventSourceMapping) and not resource.synthetic:
         resource.source = resolve(props.get("EventSourceArn") or props.get("SelfManagedEventSource"))
         resource.target = resolve(props.get("FunctionName"))
-    if isinstance(resource, m.Rule) and not extra:
+    if isinstance(resource, m.Rule) and not resource.synthetic:
         resource.bus = resolve(props.get("EventBusName"))
-    if isinstance(resource, m.Subscription) and not extra:
+    if isinstance(resource, m.Subscription) and not resource.synthetic:
         resource.topic = resolve(props.get("TopicArn"))
         resource.endpoint = resolve(props.get("Endpoint"))
+    if isinstance(resource, m.EventInvokeConfig) and not resource.synthetic:
+        resource.function = resolve(props.get("FunctionName"))
     return resource
 
 
-def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.Resource]:
+def _expand_sam_events(
+    function_id: str,
+    props: dict[str, Any],
+    raw_props: dict[str, Any],
+    condition: str | None = None,
+    condition_value: bool | None = True,
+) -> dict[str, m.Resource]:
     """Synthesise the resources SAM would generate from an `Events:` block."""
     out: dict[str, m.Resource] = {}
     events = props.get("Events")
+    raw_events = raw_props.get("Events") if isinstance(raw_props.get("Events"), dict) else {}
     if not isinstance(events, dict):
         return out
 
@@ -202,7 +290,14 @@ def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.R
             continue
         event_type = str(event.get("Type", ""))
         event_props = event.get("Properties") if isinstance(event.get("Properties"), dict) else {}
+        raw_event = raw_events.get(event_name) if isinstance(raw_events, dict) else None
+        raw_event_props = (
+            raw_event.get("Properties")
+            if isinstance(raw_event, dict) and isinstance(raw_event.get("Properties"), dict)
+            else event_props
+        )
         synthetic_id = f"{function_id}#{event_name}"
+        source_path = ("Resources", function_id, "Properties", "Events", event_name, "Properties")
 
         if event_type in _POLL_EVENTS:
             source_key, source_kind = _POLL_EVENTS[event_type]
@@ -211,8 +306,12 @@ def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.R
                 cfn_type="AWS::Lambda::EventSourceMapping",
                 kind=m.Kind.ESM,
                 props=event_props,
+                raw_props=raw_event_props,
                 synthetic=True,
                 origin=function_id,
+                source_path=source_path,
+                condition=condition,
+                condition_value=condition_value,
             )
             esm.source = resolve(event_props.get(source_key))
             esm.target = resolve({"Ref": function_id})
@@ -226,6 +325,7 @@ def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.R
                 kind=m.Kind.RULE,
                 props={
                     **event_props,
+                    "DeadletterEventType": event_type,
                     "Targets": [
                         {
                             "Arn": {"Fn::GetAtt": [function_id, "Arn"]},
@@ -242,8 +342,12 @@ def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.R
                         }
                     ],
                 },
+                raw_props=raw_event_props,
                 synthetic=True,
                 origin=function_id,
+                source_path=source_path,
+                condition=condition,
+                condition_value=condition_value,
             )
             rule.bus = resolve(event_props.get("EventBusName"))
             out[synthetic_id] = rule
@@ -254,8 +358,12 @@ def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.R
                 cfn_type="AWS::SNS::Subscription",
                 kind=m.Kind.SUBSCRIPTION,
                 props={"Protocol": "lambda", **event_props},
+                raw_props=raw_event_props,
                 synthetic=True,
                 origin=function_id,
+                source_path=source_path,
+                condition=condition,
+                condition_value=condition_value,
             )
             subscription.topic = resolve(event_props.get("Topic"))
             subscription.endpoint = resolve({"Ref": function_id})
@@ -267,11 +375,118 @@ def _expand_sam_events(function_id: str, props: dict[str, Any]) -> dict[str, m.R
                 cfn_type="AWS::Serverless::Api",
                 kind=m.Kind.API,
                 props=event_props,
+                raw_props=raw_event_props,
                 synthetic=True,
                 origin=function_id,
+                source_path=source_path,
+                condition=condition,
+                condition_value=condition_value,
             )
 
     return out
+
+
+def _parameter_defaults(raw: dict[str, Any]) -> dict[str, Any]:
+    defaults: dict[str, Any] = {}
+    for name, definition in iter_dict(raw.get("Parameters")):
+        if isinstance(definition, dict) and "Default" in definition:
+            defaults[name] = definition["Default"]
+    return defaults
+
+
+def _condition_values(raw: dict[str, Any], defaults: dict[str, Any]) -> dict[str, bool | None]:
+    conditions = raw.get("Conditions") if isinstance(raw.get("Conditions"), dict) else {}
+    resolved = {
+        name: _resolve_parameter_defaults(expression, defaults)
+        for name, expression in conditions.items()
+    }
+    values: dict[str, bool | None] = {}
+    # Conditions may refer to earlier or later conditions. Iterate to a fixed point.
+    for _ in range(len(resolved) + 1):
+        changed = False
+        for name, expression in resolved.items():
+            value = _evaluate_condition(expression, values)
+            if values.get(name) != value:
+                values[name] = value
+                changed = True
+        if not changed:
+            break
+    return values
+
+
+def _evaluate_condition(node: Any, values: dict[str, bool | None]) -> bool | None:
+    if isinstance(node, bool):
+        return node
+    if isinstance(node, str):
+        if node.lower() in ("true", "false"):
+            return node.lower() == "true"
+        return None
+    if not isinstance(node, dict):
+        return None
+    if set(node) == {"Condition"} and isinstance(node["Condition"], str):
+        return values.get(node["Condition"])
+    if "Fn::Equals" in node:
+        operands = node["Fn::Equals"]
+        if not isinstance(operands, list) or len(operands) != 2:
+            return None
+        if any(isinstance(value, (dict, list)) for value in operands):
+            return None
+        return operands[0] == operands[1]
+    if "Fn::Not" in node:
+        operands = ensure_list(node["Fn::Not"])
+        value = _evaluate_condition(operands[0], values) if len(operands) == 1 else None
+        return None if value is None else not value
+    for operator, reducer in (("Fn::And", all), ("Fn::Or", any)):
+        if operator not in node:
+            continue
+        operands = [_evaluate_condition(value, values) for value in ensure_list(node[operator])]
+        if any(value is None for value in operands):
+            return None
+        return reducer(operands)
+    return None
+
+
+def _resolve_parameter_defaults(node: Any, defaults: dict[str, Any]) -> Any:
+    if isinstance(node, dict):
+        if set(node) == {"Ref"} and isinstance(node.get("Ref"), str) and node["Ref"] in defaults:
+            return _resolve_parameter_defaults(defaults[node["Ref"]], defaults)
+        return {key: _resolve_parameter_defaults(value, defaults) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_resolve_parameter_defaults(value, defaults) for value in node]
+    return node
+
+
+def _sam_merge(global_value: Any, resource_value: Any) -> Any:
+    """Implement SAM Globals rules: maps merge, lists prepend, scalars replace."""
+    if isinstance(global_value, dict) and isinstance(resource_value, dict):
+        merged = {key: _sam_merge(value, {}) if isinstance(value, dict) else list(value) if isinstance(value, list) else value for key, value in global_value.items()}
+        for key, value in resource_value.items():
+            merged[key] = _sam_merge(merged[key], value) if key in merged else value
+        return merged
+    if isinstance(global_value, list) and isinstance(resource_value, list):
+        return [*global_value, *resource_value]
+    return resource_value
+
+
+def _attach_default_event_bus(resources: dict[str, m.Resource]) -> None:
+    rules = [
+        resource
+        for resource in resources.values()
+        if isinstance(resource, m.Rule) and not resource.scheduled and not resource.bus.configured
+    ]
+    if not rules:
+        return
+    logical_id = "__deadletter_default_event_bus__"
+    if logical_id not in resources:
+        resources[logical_id] = m.Bus(
+            logical_id=logical_id,
+            cfn_type="AWS::Events::EventBus",
+            kind=m.Kind.BUS,
+            props={"Name": "default"},
+            synthetic=True,
+        )
+    for rule in rules:
+        rule.bus = resolve({"Ref": logical_id})
 
 
 def sam_event_names(props: dict[str, Any]) -> list[str]:

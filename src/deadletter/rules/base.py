@@ -22,10 +22,11 @@ must produce exactly the documented finding; `passing.yaml` must produce none.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable
+from typing import Any, Iterable
 
-from ..findings import Finding, Severity
+from ..findings import Finding, Remediation, Severity
 from ..graph import EventGraph
+from ..model import Resource
 
 _REGISTRY: dict[str, type["Rule"]] = {}
 
@@ -64,8 +65,46 @@ def get_rule(rule_id: str) -> Rule | None:
 
 
 def run(graph: EventGraph, rule_ids: Iterable[str] | None = None) -> list[Finding]:
-    selected = [r for r in all_rules() if rule_ids is None or r.id in set(rule_ids)]
+    selected_ids = set(rule_ids) if rule_ids is not None else None
+    selected = [rule for rule in all_rules() if selected_ids is None or rule.id in selected_ids]
     findings: list[Finding] = []
     for rule in selected:
         findings.extend(rule.check(graph))
+    for finding in findings:
+        if finding.source is None:
+            finding.source = graph.template.source
+        if finding.location is None:
+            if finding.remediations:
+                finding.location = finding.remediations[0].location
+            elif finding.resources:
+                finding.location = graph.source_location(finding.resources[0])
+        conditional = [
+            resource.logical_id
+            for resource_id in finding.resources
+            if (resource := graph.template.get(resource_id)) is not None
+            and resource.condition_value is None
+        ]
+        if conditional:
+            if finding.severity is Severity.BLOCK:
+                finding.severity = Severity.WARN
+                if finding.message.startswith("BLOCK:"):
+                    finding.message = "WARN:" + finding.message[len("BLOCK:") :]
+            finding.inferred = True
+            finding.evidence["conditional_resources"] = conditional
     return sorted(findings, key=lambda f: f.sort_key)
+
+
+def remediation(
+    graph: EventGraph,
+    resource: Resource,
+    *property_path: str | int,
+    description: str,
+    suggested_value: Any = None,
+    automatic: bool = False,
+) -> Remediation:
+    return Remediation(
+        location=graph.source_location(resource, *property_path),
+        description=description,
+        suggested_value=suggested_value,
+        automatic=automatic,
+    )
