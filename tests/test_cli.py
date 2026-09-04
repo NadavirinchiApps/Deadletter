@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 from deadletter.cli import main
@@ -60,6 +62,18 @@ def test_mermaid_output_is_available_from_the_cli(capsys):
 
     assert exit_code == 0
     assert capsys.readouterr().out.startswith("graph LR")
+
+
+def test_report_text_reaches_stdout_as_utf8(monkeypatch):
+    """A cp1252 stdout must not mangle the em dashes in finding messages."""
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+
+    exit_code = main([str(FIXTURES / "EDA001" / "violating.yaml"), "--fail-on", "none"])
+    sys.stdout.flush()
+
+    assert exit_code == 0
+    assert "—" in raw.getvalue().decode("utf-8")
 
 
 def test_cli_can_write_a_report_file(capsys, tmp_path: Path):

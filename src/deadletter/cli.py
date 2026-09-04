@@ -47,8 +47,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _use_utf8_stdout() -> None:
+    """Emit reports as UTF-8 whatever the console code page says.
+
+    Finding messages carry em dashes and arrows. On Windows a piped stdout
+    defaults to the ANSI code page, so those characters reach the reader as
+    mojibake even though the same report written with --output is correct.
+    """
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(encoding="utf-8")
+    except (OSError, ValueError):  # pragma: no cover - stream already detached
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _use_utf8_stdout()
     if args.format == "mermaid" and len(args.templates) != 1:
         print("ERROR: mermaid output accepts exactly one template", file=sys.stderr)
         return 2

@@ -77,8 +77,7 @@ at a time.
 
 ## GitHub Actions
 
-The repository includes a composite action. After publishing the repository,
-replace `<owner>` with its GitHub owner:
+The repository includes a composite action:
 
 ```yaml
 permissions:
@@ -88,7 +87,7 @@ permissions:
 steps:
   - uses: actions/checkout@v7.0.1
   - name: Scan event delivery
-    uses: <owner>/deadletter@v0.2.0
+    uses: NadavirinchiApps/Deadletter@v0.2.0
     with:
       template: template.yaml
       format: sarif
