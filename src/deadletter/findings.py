@@ -85,6 +85,10 @@ class Finding:
     source: str | None = None
     location: SourceLocation | None = None
     remediations: list[Remediation] = field(default_factory=list)
+    # Set when a template suppresses this finding. Suppressed findings are kept
+    # and reported; they just stop failing the build.
+    suppressed: bool = False
+    suppression: str | None = None
 
     def __post_init__(self) -> None:
         if not self.resources:
@@ -109,4 +113,6 @@ class Finding:
             "source": self.source,
             "location": self.location.to_dict() if self.location else None,
             "remediations": [remediation.to_dict() for remediation in self.remediations],
+            "suppressed": self.suppressed,
+            "suppression": self.suppression,
         }

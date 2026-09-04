@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  PaymentDlq is wired up correctly as a dead-letter queue and then abandoned.
+  Nothing polls it, no alarm watches it, and it keeps the 4-day default
+  retention, so every message it catches is deleted four days later in silence.
+Resources:
+  PaymentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: payment-queue
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PaymentDlq.Arn
+        maxReceiveCount: 5
+  PaymentDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: payment-dlq
+      MessageRetentionPeriod: 1209600
+  SettlePaymentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.settle
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PaymentQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

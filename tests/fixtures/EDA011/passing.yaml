@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  The same slow report, restructured. The API route only accepts the request and
+  returns an id, well inside the integration timeout. The two-minute build runs
+  off the request path on a queue, where a long timeout is safe.
+Globals:
+  Function:
+    Runtime: python3.12
+Resources:
+  ReportQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: report-queue
+      VisibilityTimeout: 900
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReportDlq.Arn
+        maxReceiveCount: 3
+  ReportDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: report-dlq
+      MessageRetentionPeriod: 1209600
+  ReportDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: report-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ReportDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  AcceptReportRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.accept
+      Timeout: 10
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            Path: /reports
+            Method: post
+  GetReportStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.status
+      Timeout: 29
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            Path: /reports/{id}
+            Method: get
+  BuildReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.build_report
+      Timeout: 120
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ReportQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

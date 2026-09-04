@@ -34,6 +34,7 @@ _TYPE_KIND: dict[str, m.Kind] = {
     "AWS::StepFunctions::StateMachine": m.Kind.STATE_MACHINE,
     "AWS::Serverless::StateMachine": m.Kind.STATE_MACHINE,
     "AWS::Kinesis::Stream": m.Kind.STREAM,
+    "AWS::Kinesis::StreamConsumer": m.Kind.STREAM_CONSUMER,
     "AWS::DynamoDB::Table": m.Kind.TABLE,
     "AWS::Serverless::SimpleTable": m.Kind.TABLE,
     "AWS::RDS::DBInstance": m.Kind.DATABASE,
@@ -56,6 +57,7 @@ _CLASS: dict[m.Kind, type[m.Resource]] = {
     m.Kind.BUS: m.Bus,
     m.Kind.STREAM: m.Stream,
     m.Kind.TABLE: m.Table,
+    m.Kind.STREAM_CONSUMER: m.StreamConsumer,
     m.Kind.ROLE: m.Role,
     m.Kind.INVOKE_CONFIG: m.EventInvokeConfig,
 }
@@ -78,10 +80,14 @@ class Template:
         resources: dict[str, m.Resource],
         source: str | None = None,
         locations: dict[tuple[str | int, ...], tuple[int, int]] | None = None,
+        exports: set[str] | None = None,
     ) -> None:
         self.resources = resources
         self.source = source
         self.locations = locations or {}
+        # Logical IDs published through an Output Export. Another stack can
+        # reach these, so their absence of local consumers proves less.
+        self.exports = exports or set()
 
     def __iter__(self):
         return iter(self.resources.values())
@@ -135,7 +141,20 @@ def loads(text: str, source: str | None = None) -> Template:
     raw, locations = _decode(text)
     if not isinstance(raw, dict):
         raise ValueError("template did not parse to a mapping")
-    return Template(_build(raw), source=source, locations=locations)
+    return Template(
+        _build(raw), source=source, locations=locations, exports=_exported_ids(raw)
+    )
+
+
+def _exported_ids(raw: dict[str, Any]) -> set[str]:
+    """Logical IDs an Output publishes under an Export name."""
+    from .intrinsics import referenced_ids
+
+    exported: set[str] = set()
+    for _, output in iter_dict(raw.get("Outputs")):
+        if isinstance(output, dict) and output.get("Export") is not None:
+            exported.update(referenced_ids(output.get("Value")))
+    return exported
 
 
 def _decode(text: str) -> tuple[Any, dict[tuple[str | int, ...], tuple[int, int]]]:
@@ -223,6 +242,7 @@ def _build(raw: dict[str, Any]) -> dict[str, m.Resource]:
             raw_props = _sam_merge(function_globals, raw_props)
 
         props = _resolve_parameter_defaults(raw_props, parameter_defaults)
+        metadata = body.get("Metadata") if isinstance(body.get("Metadata"), dict) else {}
         resources[logical_id] = _make(
             logical_id,
             cfn_type,
@@ -232,6 +252,7 @@ def _build(raw: dict[str, Any]) -> dict[str, m.Resource]:
             source_path=("Resources", logical_id, "Properties"),
             condition=condition,
             condition_value=condition_value,
+            metadata=metadata,
         )
 
     # Second pass: SAM Events need the full resource map to exist first.
@@ -268,6 +289,8 @@ def _make(logical_id: str, cfn_type: str, kind: m.Kind, props: dict[str, Any], *
         resource.endpoint = resolve(props.get("Endpoint"))
     if isinstance(resource, m.EventInvokeConfig) and not resource.synthetic:
         resource.function = resolve(props.get("FunctionName"))
+    if isinstance(resource, m.StreamConsumer):
+        resource.stream = resolve(props.get("StreamARN"))
     return resource
 
 
@@ -372,9 +395,11 @@ def _expand_sam_events(
         elif event_type in ("Api", "HttpApi"):
             out[synthetic_id] = m.Resource(
                 logical_id=synthetic_id,
-                cfn_type="AWS::Serverless::Api",
+                cfn_type=(
+                    "AWS::Serverless::HttpApi" if event_type == "HttpApi" else "AWS::Serverless::Api"
+                ),
                 kind=m.Kind.API,
-                props=event_props,
+                props={**event_props, "DeadletterEventType": event_type},
                 raw_props=raw_event_props,
                 synthetic=True,
                 origin=function_id,

@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Four suppressions covering the four cases: one valid and honoured, one already
+  expired, one with no reason, and one with an unreadable expiry. Only the first
+  should take effect.
+Resources:
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      deadletter:
+        ignore:
+          - rule: EDA001
+            reason: Consumer is idempotent on order id; see ADR-114.
+            expires: 2099-12-31
+    Properties:
+      QueueName: orders-queue
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+  ShippingQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      deadletter:
+        ignore:
+          - rule: EDA001
+            reason: Deferred to the Q3 reliability sprint.
+            expires: 2020-01-01
+    Properties:
+      QueueName: shipping-queue
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+  BillingQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      deadletter:
+        ignore:
+          - rule: EDA001
+    Properties:
+      QueueName: billing-queue
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+  AuditQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      deadletter:
+        ignore:
+          - rule: EDA001
+            reason: Waiting on the upstream fix.
+            expires: soon
+    Properties:
+      QueueName: audit-queue
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+  OrdersDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-dlq
+      MessageRetentionPeriod: 1209600
+  OrdersDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: orders-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrdersDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  ProcessOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.process
+      Runtime: python3.12
+      Timeout: 60
+      Events:
+        FromOrders:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+        FromShipping:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ShippingQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+        FromBilling:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BillingQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+        FromAudit:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AuditQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

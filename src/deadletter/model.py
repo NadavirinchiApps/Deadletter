@@ -9,6 +9,7 @@ and a finding that can't quote the config it objects to isn't credible.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -26,6 +27,7 @@ class Kind(StrEnum):
     SUBSCRIPTION = "subscription"
     STATE_MACHINE = "state_machine"
     STREAM = "stream"
+    STREAM_CONSUMER = "stream_consumer"
     TABLE = "table"
     DATABASE = "database"
     ALARM = "alarm"
@@ -39,8 +41,18 @@ class Kind(StrEnum):
 # purely because these defaults are wrong for production.
 LAMBDA_DEFAULT_TIMEOUT = 3
 SQS_DEFAULT_VISIBILITY_TIMEOUT = 30
+SQS_DEFAULT_RETENTION = 345_600  # 4 days
 ASYNC_DEFAULT_MAX_EVENT_AGE = 21_600  # 6 hours
 ASYNC_DEFAULT_RETRY_ATTEMPTS = 2
+
+# A REST API integration is capped at 29s and an HTTP API at 30s. A function
+# allowed to run longer returns 504 to the caller while it keeps going.
+REST_API_INTEGRATION_TIMEOUT = 29
+HTTP_API_INTEGRATION_TIMEOUT = 30
+
+# One shard serves 2 MB/s of reads across every shared-throughput consumer.
+# AWS's own guidance is to stay at or below two before moving to fan-out.
+STREAM_SHARED_CONSUMER_LIMIT = 2
 
 
 @dataclass
@@ -55,6 +67,7 @@ class Resource:
     source_path: tuple[str | int, ...] = field(default_factory=tuple)
     condition: str | None = None
     condition_value: bool | None = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def prop(self, *names: str, default: Any = None) -> Any:
         if not names:
@@ -149,6 +162,15 @@ class Queue(Resource):
     def max_receive_count(self) -> int | None:
         policy = self.prop("RedrivePolicy")
         return as_int(policy.get("maxReceiveCount")) if isinstance(policy, dict) else None
+
+    @property
+    def message_retention(self) -> int | None:
+        value = self.prop("MessageRetentionPeriod")
+        return SQS_DEFAULT_RETENTION if value is None else as_int(value)
+
+    @property
+    def message_retention_declared(self) -> bool:
+        return self.prop("MessageRetentionPeriod") is not None
 
 
 @dataclass
@@ -286,13 +308,42 @@ class EventInvokeConfig(Resource):
 class StateMachine(Resource):
     @property
     def definition(self) -> dict[str, Any]:
+        """SAM writes `Definition` inline; native templates write a JSON string.
+
+        A `DefinitionString` wrapped in Fn::Sub arrives here as a dict and is
+        left alone — a rule must not pretend to read a definition it could not
+        substitute. `DefinitionUri` points outside the template entirely.
+        """
         definition = self.prop("Definition", "DefinitionString")
-        return definition if isinstance(definition, dict) else {}
+        if isinstance(definition, dict):
+            return definition
+        if isinstance(definition, str):
+            try:
+                parsed = json.loads(definition)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
     @property
     def states(self) -> dict[str, Any]:
         states = self.definition.get("States")
         return states if isinstance(states, dict) else {}
+
+    def iter_states(self, states: dict[str, Any] | None = None) -> list[tuple[str, dict[str, Any]]]:
+        """Every state, including those nested in Parallel branches and Map bodies."""
+        found: list[tuple[str, dict[str, Any]]] = []
+        for name, state in (self.states if states is None else states).items():
+            if not isinstance(state, dict):
+                continue
+            found.append((str(name), state))
+            for branch in ensure_list(state.get("Branches")):
+                if isinstance(branch, dict) and isinstance(branch.get("States"), dict):
+                    found.extend(self.iter_states(branch["States"]))
+            iterator = first(state.get("Iterator"), state.get("ItemProcessor"))
+            if isinstance(iterator, dict) and isinstance(iterator.get("States"), dict):
+                found.extend(self.iter_states(iterator["States"]))
+        return found
 
 
 @dataclass
@@ -314,7 +365,23 @@ class Bus(Resource):
 
 @dataclass
 class Stream(Resource):
-    pass
+    @property
+    def shard_count(self) -> int | None:
+        return as_int(self.prop("ShardCount"))
+
+    @property
+    def on_demand(self) -> bool:
+        """On-demand streams scale their own read throughput, so shared
+        consumers do not contend the way they do on a provisioned shard."""
+        details = self.prop("StreamModeDetails")
+        return isinstance(details, dict) and details.get("StreamMode") == "ON_DEMAND"
+
+
+@dataclass
+class StreamConsumer(Resource):
+    """Enhanced fan-out: its own 2 MB/s, so it does not contend with pollers."""
+
+    stream: Reference = field(default_factory=Reference)
 
 
 @dataclass
@@ -328,6 +395,12 @@ class Table(Resource):
     def provisioned(self) -> bool:
         """Provisioned tables throttle under burst; on-demand mostly doesn't."""
         return self.billing_mode != "PAY_PER_REQUEST" and self.prop("ProvisionedThroughput") is not None
+
+    @property
+    def write_capacity(self) -> int | None:
+        throughput = self.prop("ProvisionedThroughput")
+        return as_int(throughput.get("WriteCapacityUnits")) if isinstance(throughput, dict) else None
+
 
     @property
     def stream_enabled(self) -> bool:

@@ -8,7 +8,7 @@ from .findings import Finding, Remediation, Severity, SourceLocation
 from .graph import EventGraph, build
 from .parse import Template, load, loads
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def scan(path, rule_ids=None):

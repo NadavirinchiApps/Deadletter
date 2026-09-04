@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  IngestFunction is polled by a queue with no MaximumConcurrency and has no
+  reserved concurrency, so Lambda will scale it to the account limit. It writes
+  into a table pinned at 5 write capacity units with no scaling target.
+Resources:
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: events
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ingest-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestDlq.Arn
+        maxReceiveCount: 5
+  IngestDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ingest-dlq
+      MessageRetentionPeriod: 1209600
+  IngestDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ingest-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.ingest
+      Runtime: python3.12
+      Timeout: 30
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref EventsTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

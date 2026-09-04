@@ -80,6 +80,8 @@ class EventGraph:
                     self._add_function_edges(resource)
                 case m.EventInvokeConfig():
                     self._add_event_invoke_config(resource)
+                case m.StateMachine():
+                    self._add_state_machine_edges(resource)
                 case _:
                     pass
 
@@ -96,10 +98,17 @@ class EventGraph:
     def _add_esm(self, esm: m.EventSourceMapping) -> None:
         source = self.template.resolve_ref(esm.source)
         target = self.template.resolve_ref(esm.target)
+        # Enhanced fan-out points the mapping at a consumer, not the stream.
+        # The delivery still originates at the stream, so resolve through and
+        # record that this reader has its own throughput.
+        fan_out = False
+        if isinstance(source, m.StreamConsumer):
+            fan_out = True
+            source = self.template.resolve_ref(source.stream) or source
         if source is not None and esm.source_kind is m.Kind.UNKNOWN:
             esm.source_kind = source.kind
         if source is not None and target is not None:
-            self._add(source, target, "poll", via=esm.logical_id)
+            self._add(source, target, "poll", via=esm.logical_id, props={"enhanced_fan_out": fan_out})
         failure = self.template.resolve_ref(esm.on_failure)
         if failure is not None:
             self._add(esm, failure, "on_failure", via=esm.logical_id)
@@ -238,6 +247,23 @@ class EventGraph:
         if destination is not None:
             self._add(config, destination, "on_failure", via=config.logical_id)
 
+    def _add_state_machine_edges(self, machine: m.StateMachine) -> None:
+        """A workflow is event delivery too: a Task state is a real invocation."""
+        for name, state in machine.iter_states():
+            if str(state.get("Type")) != "Task":
+                continue
+            parameters = state.get("Parameters")
+            candidates = [resolve(state.get("Resource"))]
+            if isinstance(parameters, dict):
+                for key in ("FunctionName", "QueueUrl", "TopicArn", "StateMachineArn"):
+                    candidates.append(resolve(parameters.get(key)))
+            for reference in candidates:
+                target = self.template.resolve_ref(reference)
+                if target is None:
+                    continue
+                kind = "invoke" if target.kind in (m.Kind.FUNCTION, m.Kind.STATE_MACHINE) else "publish"
+                self._add(machine, target, kind, via=name, props={"state": name})
+
     def _add_api_event(self, event: m.Resource) -> None:
         function = self.template.get(event.origin)
         if not isinstance(function, m.Function):
@@ -286,6 +312,49 @@ class EventGraph:
 
     def has_failure_path(self, logical_id: str) -> bool:
         return any(edge.kind in FAILURE_EDGES for edge in self.out_edges(logical_id))
+
+    def failure_senders(self, logical_id: str) -> list[Edge]:
+        """Edges that dump failed traffic into this resource."""
+        return [edge for edge in self.in_edges(logical_id) if edge.kind in FAILURE_EDGES]
+
+    def delivery_routes(self, logical_id: str) -> list[Edge]:
+        """Edges by which something this resource carries actually reaches a consumer."""
+        return [edge for edge in self.out_edges(logical_id) if edge.kind in DELIVERY_EDGES]
+
+    def autoscaling_targets_on(self, logical_id: str) -> list[m.Resource]:
+        """Application Auto Scaling targets pointed at this resource.
+
+        Not modelled as a kind of its own — the only question a rule asks is
+        whether the capacity ceiling is fixed or allowed to move.
+        """
+        return [
+            resource
+            for resource in self.template
+            if resource.cfn_type == "AWS::ApplicationAutoScaling::ScalableTarget"
+            and logical_id in referenced_ids(resource.prop("ResourceId"))
+        ]
+
+    def alarms_on(self, logical_id: str) -> list[m.Alarm]:
+        """Alarms whose dimensions name this resource.
+
+        An operator watching queue depth is not a drain, but it is the
+        difference between a silent backlog and a paged human.
+        """
+        resource = self.template.get(logical_id)
+        name_hint = resource.name_hint if resource is not None else None
+        found: list[m.Alarm] = []
+        for alarm in self.resources(m.Kind.ALARM):
+            if not isinstance(alarm, m.Alarm):
+                continue
+            for dimension in alarm.dimensions:
+                value = dimension.get("Value")
+                if logical_id in referenced_ids(value):
+                    found.append(alarm)
+                    break
+                if name_hint is not None and value == name_hint:
+                    found.append(alarm)
+                    break
+        return found
 
     def invoke_configs_for(self, function_id: str) -> list[m.EventInvokeConfig]:
         configs: list[m.EventInvokeConfig] = []

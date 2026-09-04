@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  The same four consumers on the same single-shard stream, but only two read it
+  directly. Fraud and archive each registered a stream consumer, so they get
+  their own 2 MB/s of enhanced fan-out instead of competing for the shard's.
+Resources:
+  ClickStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: click-stream
+      ShardCount: 1
+      RetentionPeriodHours: 24
+  FraudConsumer:
+    Type: AWS::Kinesis::StreamConsumer
+    Properties:
+      ConsumerName: fraud
+      StreamARN: !GetAtt ClickStream.Arn
+  ArchiveConsumer:
+    Type: AWS::Kinesis::StreamConsumer
+    Properties:
+      ConsumerName: archive
+      StreamARN: !GetAtt ClickStream.Arn
+  StreamFailureDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: stream-failure-dlq
+      MessageRetentionPeriod: 1209600
+  StreamFailureDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: stream-failure-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt StreamFailureDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  AnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.analytics
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ClickStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn
+  PersonalisationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.personalise
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ClickStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn
+  FraudFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.fraud
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt FraudConsumer.ConsumerARN
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn
+  ArchiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.archive
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ArchiveConsumer.ConsumerARN
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn

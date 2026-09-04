@@ -6,8 +6,12 @@ branding:
 
 inputs:
   template:
-    description: Path to the CloudFormation or SAM template.
+    description: Path to a CloudFormation or SAM template, or a directory to search.
     required: true
+  show-suppressed:
+    description: Include findings waived by template metadata in a text report.
+    required: false
+    default: "false"
   fail-on:
     description: Lowest severity that fails the step (BLOCK, WARN, INFO, or none).
     required: false
@@ -38,9 +42,13 @@ runs:
         DEADLETTER_FAIL_ON: ${{ inputs.fail-on }}
         DEADLETTER_FORMAT: ${{ inputs.format }}
         DEADLETTER_OUTPUT: ${{ inputs.output }}
+        DEADLETTER_SHOW_SUPPRESSED: ${{ inputs.show-suppressed }}
       run: |
         args=("$DEADLETTER_TEMPLATE" --fail-on "$DEADLETTER_FAIL_ON" --format "$DEADLETTER_FORMAT")
         if [[ -n "$DEADLETTER_OUTPUT" ]]; then
           args+=(--output "$DEADLETTER_OUTPUT")
+        fi
+        if [[ "$DEADLETTER_SHOW_SUPPRESSED" == "true" ]]; then
+          args+=(--show-suppressed)
         fi
         deadletter "${args[@]}"

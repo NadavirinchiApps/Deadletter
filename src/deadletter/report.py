@@ -10,9 +10,14 @@ from .findings import Finding, Severity
 
 
 def summary(findings: Iterable[Finding]) -> dict[str, int]:
+    """Counts of what still fails the build, plus how much was waived."""
     counts = {str(severity): 0 for severity in Severity}
+    counts["suppressed"] = 0
     for finding in findings:
-        counts[str(finding.severity)] += 1
+        if finding.suppressed:
+            counts["suppressed"] += 1
+        else:
+            counts[str(finding.severity)] += 1
     return counts
 
 
@@ -28,27 +33,44 @@ def render_json(findings: list[Finding]) -> str:
     return json.dumps(report_dict(findings), indent=2, sort_keys=True)
 
 
-def render_text(findings: list[Finding]) -> str:
-    if not findings:
-        return "No findings."
+def render_text(findings: list[Finding], show_suppressed: bool = False) -> str:
+    counts = summary(findings)
+    shown = [f for f in findings if show_suppressed or not f.suppressed]
+    if not shown:
+        tail = _suppressed_note(counts)
+        return "No findings." + (f" {tail}" if tail else "")
 
     lines: list[str] = []
-    for finding in findings:
+    for finding in shown:
         location = _display_location(finding)
-        lines.append(f"[{finding.severity}] {finding.rule_id} - {finding.title}")
+        prefix = "SUPPRESSED " if finding.suppressed else ""
+        lines.append(f"[{prefix}{finding.severity}] {finding.rule_id} - {finding.title}")
         if location:
             lines.append(f"  at {location}")
         lines.append(f"  {finding.message}")
         lines.append(f"  resources: {', '.join(finding.resources)}")
+        if finding.suppressed and finding.suppression:
+            lines.append(f"  suppressed by {finding.suppression}")
         for fix in finding.remediations:
             lines.append(f"  fix {fix.path}: {fix.description}")
         lines.append("")
 
-    counts = summary(findings)
-    lines.append(
-        f"Summary: {counts['BLOCK']} BLOCK, {counts['WARN']} WARN, {counts['INFO']} INFO"
-    )
+    line = f"Summary: {counts['BLOCK']} BLOCK, {counts['WARN']} WARN, {counts['INFO']} INFO"
+    note = _suppressed_note(counts)
+    lines.append(line + (f", {counts['suppressed']} suppressed" if counts["suppressed"] else ""))
+    if note and not show_suppressed:
+        lines.append(note)
     return "\n".join(lines)
+
+
+def _suppressed_note(counts: dict[str, int]) -> str:
+    if not counts.get("suppressed"):
+        return ""
+    plural = "" if counts["suppressed"] == 1 else "s"
+    return (
+        f"{counts['suppressed']} suppressed finding{plural} hidden; "
+        f"re-run with --show-suppressed to see what was waived."
+    )
 
 
 def render_sarif(findings: list[Finding]) -> str:
@@ -83,6 +105,15 @@ def render_sarif(findings: list[Finding]) -> str:
         physical = _sarif_location(finding)
         if physical:
             result["locations"] = [{"physicalLocation": physical}]
+        if finding.suppressed:
+            # SARIF models this natively, so code-scanning UIs grey the result
+            # out instead of raising it. Inventing a property would not.
+            result["suppressions"] = [
+                {
+                    "kind": "inSource",
+                    "justification": finding.suppression or "suppressed in template metadata",
+                }
+            ]
         results.append(result)
 
     payload = {

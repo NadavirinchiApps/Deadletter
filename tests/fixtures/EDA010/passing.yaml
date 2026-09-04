@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Both tasks retry the four transient Lambda errors before giving up, and the
+  payment step catches what survives the retries so reserved stock is released.
+  The nested Map state is checked too, not just the top level.
+Resources:
+  ReserveStockFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.reserve
+      Runtime: python3.12
+      Timeout: 30
+  ChargeCardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.charge
+      Runtime: python3.12
+      Timeout: 30
+  ReleaseStockFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.release
+      Runtime: python3.12
+      Timeout: 30
+  NotifyLineItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.notify
+      Runtime: python3.12
+      Timeout: 30
+  CheckoutWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+        Comment: Reserve stock, take payment, then notify each line item.
+        StartAt: ReserveStock
+        States:
+          ReserveStock:
+            Type: Task
+            Resource: !GetAtt ReserveStockFunction.Arn
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                  - Lambda.TooManyRequestsException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Next: ChargeCard
+          ChargeCard:
+            Type: Task
+            Resource: !GetAtt ChargeCardFunction.Arn
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                  - Lambda.TooManyRequestsException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: ReleaseStock
+            Next: NotifyLineItems
+          NotifyLineItems:
+            Type: Map
+            ItemsPath: $.lineItems
+            ItemProcessor:
+              ProcessorConfig:
+                Mode: INLINE
+              StartAt: NotifyLineItem
+              States:
+                NotifyLineItem:
+                  Type: Task
+                  Resource: !GetAtt NotifyLineItemFunction.Arn
+                  Retry:
+                    - ErrorEquals:
+                        - States.ALL
+                      IntervalSeconds: 2
+                      MaxAttempts: 3
+                      BackoffRate: 2
+                  End: true
+            End: true
+          ReleaseStock:
+            Type: Task
+            Resource: !GetAtt ReleaseStockFunction.Arn
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            End: true

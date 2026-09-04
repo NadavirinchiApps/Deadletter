@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AuditTopic keeps its subscriber, so the publish reaches a consumer. PartnerTopic
+  has no local subscriber but exports its ARN for another stack to subscribe to,
+  which this scan cannot see and must not call a defect.
+Resources:
+  AuditTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: audit-topic
+  PartnerTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: partner-topic
+  AuditDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: audit-dlq
+      MessageRetentionPeriod: 1209600
+  AuditDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: audit-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuditDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  RecordAuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.record
+      Runtime: python3.12
+      Timeout: 30
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AuditTopic.TopicName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt PartnerTopic.TopicName
+      Environment:
+        Variables:
+          AUDIT_TOPIC: !Ref AuditTopic
+          PARTNER_TOPIC: !Ref PartnerTopic
+  ArchiveAuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.archive
+      Runtime: python3.12
+      Timeout: 30
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt AuditDlq.Arn
+      Events:
+        FromTopic:
+          Type: SNS
+          Properties:
+            Topic: !Ref AuditTopic
+            RedrivePolicy:
+              deadLetterTargetArn: !GetAtt AuditDlq.Arn
+Outputs:
+  PartnerTopicArn:
+    Description: Subscribed by the partner-integration stack.
+    Value: !Ref PartnerTopic
+    Export:
+      Name: partner-topic-arn

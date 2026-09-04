@@ -22,11 +22,13 @@ must produce exactly the documented finding; `passing.yaml` must produce none.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import date
 from typing import Any, Iterable
 
 from ..findings import Finding, Remediation, Severity
 from ..graph import EventGraph
 from ..model import Resource
+from ..suppress import apply, collect
 
 _REGISTRY: dict[str, type["Rule"]] = {}
 
@@ -64,7 +66,11 @@ def get_rule(rule_id: str) -> Rule | None:
     return cls() if cls else None
 
 
-def run(graph: EventGraph, rule_ids: Iterable[str] | None = None) -> list[Finding]:
+def run(
+    graph: EventGraph,
+    rule_ids: Iterable[str] | None = None,
+    today: date | None = None,
+) -> list[Finding]:
     selected_ids = set(rule_ids) if rule_ids is not None else None
     selected = [rule for rule in all_rules() if selected_ids is None or rule.id in selected_ids]
     findings: list[Finding] = []
@@ -91,6 +97,9 @@ def run(graph: EventGraph, rule_ids: Iterable[str] | None = None) -> list[Findin
                     finding.message = "WARN:" + finding.message[len("BLOCK:") :]
             finding.inferred = True
             finding.evidence["conditional_resources"] = conditional
+
+    suppressions, _ = collect(graph.template)
+    apply(findings, suppressions, today)
     return sorted(findings, key=lambda f: f.sort_key)
 
 

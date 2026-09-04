@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Four separate teams each attached their own Lambda directly to the same
+  single-shard click stream. All four share the shard's 2 MB/s read budget, so
+  adding the fourth made the other three slower rather than adding capacity.
+Resources:
+  ClickStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: click-stream
+      ShardCount: 1
+      RetentionPeriodHours: 24
+  StreamFailureDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: stream-failure-dlq
+      MessageRetentionPeriod: 1209600
+  StreamFailureDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: stream-failure-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt StreamFailureDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  AnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.analytics
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ClickStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn
+  PersonalisationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.personalise
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ClickStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn
+  FraudFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.fraud
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ClickStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn
+  ArchiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.archive
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromStream:
+          Type: Kinesis
+          Properties:
+            Stream: !GetAtt ClickStream.Arn
+            StartingPosition: LATEST
+            BatchSize: 100
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt StreamFailureDlq.Arn

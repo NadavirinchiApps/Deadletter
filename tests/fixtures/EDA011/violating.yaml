@@ -1,0 +1,19 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  A report that can take two minutes to build, exposed directly on a REST API
+  route. API Gateway stops waiting at 29 seconds and returns 504; the function
+  keeps running and finishes the write the caller was told had failed.
+Resources:
+  BuildReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.build_report
+      Runtime: python3.12
+      Timeout: 120
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            Path: /reports
+            Method: post

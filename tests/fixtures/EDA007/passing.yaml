@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Three writers, three different ways of keeping the ceiling and the load in
+  step. IngestFunction caps itself with ReservedConcurrentExecutions. ArchiveFunction
+  is throttled at the event source with ScalingConfig. ReportFunction writes to an
+  on-demand table, which has no fixed ceiling to exceed.
+Resources:
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: events
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+  ArchiveTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: archive
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 25
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+  ReportTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: report
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+  WorkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: work-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WorkDlq.Arn
+        maxReceiveCount: 5
+  WorkDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: work-dlq
+      MessageRetentionPeriod: 1209600
+  WorkDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: work-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WorkDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.ingest
+      Runtime: python3.12
+      Timeout: 30
+      ReservedConcurrentExecutions: 5
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref EventsTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WorkQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+  ArchiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.archive
+      Runtime: python3.12
+      Timeout: 30
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref ArchiveTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WorkQueue.Arn
+            BatchSize: 10
+            ScalingConfig:
+              MaximumConcurrency: 20
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+  ReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.report
+      Runtime: python3.12
+      Timeout: 30
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref ReportTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WorkQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

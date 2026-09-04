@@ -1,0 +1,24 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  The subscription that used to read AuditTopic was deleted with the consumer it
+  fed, but the topic and the publisher's permission stayed. Publishes still
+  succeed and are still counted as delivered. Nothing receives them, and the
+  topic ARN is not exported, so nothing in another stack can be reading it either.
+Resources:
+  AuditTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: audit-topic
+  RecordAuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.record
+      Runtime: python3.12
+      Timeout: 30
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AuditTopic.TopicName
+      Environment:
+        Variables:
+          AUDIT_TOPIC: !Ref AuditTopic

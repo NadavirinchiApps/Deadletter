@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  The dead-letter queue is held at the 14-day maximum while its source keeps the
+  4-day default, so even a message that fails at the very end of the source
+  window still has ten days left to be inspected and redriven.
+Resources:
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-queue
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+  OrdersDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-dlq
+      MessageRetentionPeriod: 1209600
+  OrdersDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: orders-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrdersDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  ProcessOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.process
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

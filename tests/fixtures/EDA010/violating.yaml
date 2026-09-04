@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ChargeCard runs with no Retry and no Catch at all. A Lambda.TooManyRequestsException
+  during a traffic spike fails the execution outright, after ReserveStock has
+  already committed inventory that nothing now releases.
+Resources:
+  ReserveStockFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.reserve
+      Runtime: python3.12
+      Timeout: 30
+  ChargeCardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.charge
+      Runtime: python3.12
+      Timeout: 30
+  CheckoutWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+        Comment: Reserve stock, then take payment.
+        StartAt: ReserveStock
+        States:
+          ReserveStock:
+            Type: Task
+            Resource: !GetAtt ReserveStockFunction.Arn
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                  - Lambda.TooManyRequestsException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Next: ChargeCard
+          ChargeCard:
+            Type: Task
+            Resource: !GetAtt ChargeCardFunction.Arn
+            End: true

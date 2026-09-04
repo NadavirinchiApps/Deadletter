@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  OrdersDlq keeps messages for one day while its source keeps them for four.
+  A message that fails on day two arrives at the dead-letter queue already older
+  than the dead-letter queue's own retention and is deleted on arrival.
+Resources:
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-queue
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDlq.Arn
+        maxReceiveCount: 5
+  OrdersDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-dlq
+      MessageRetentionPeriod: 86400
+  OrdersDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: orders-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrdersDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+  ProcessOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.process
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
