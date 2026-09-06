@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import (
     HTTP_API_INTEGRATION_TIMEOUT,
     REST_API_INTEGRATION_TIMEOUT,
@@ -15,7 +15,7 @@ from .base import Rule, register, remediation
 @register
 class EDA011(Rule):
     id = "EDA011"
-    severity = Severity.BLOCK
+    impact = Impact.DUPLICATION
     title = "Handler outlives the API integration timeout"
     condition = "Any request whose handler runs past the integration timeout."
 
@@ -42,10 +42,11 @@ class EDA011(Rule):
             if timeout is None:
                 yield Finding(
                     rule_id=self.id,
-                    severity=Severity.WARN,
+                    impact=self.impact,
+                    confidence=Confidence.UNASSESSED,
                     title=self.title,
                     message=(
-                        f"WARN: cannot verify that {function.logical_id} finishes inside the "
+                        f"cannot verify that {function.logical_id} finishes inside the "
                         f"{limit}s {flavour} API integration timeout because its Timeout is "
                         f"unresolved. Required: resolve the deployment value and verify Timeout is "
                         f"at most {limit}s. Consequence: a handler that outlives the integration "
@@ -74,10 +75,10 @@ class EDA011(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                severity=self.severity,
-                title=self.title,
+                impact=self.impact,
+                                title=self.title,
                 message=(
-                    f"BLOCK: {function.logical_id} Timeout is {timeout}s, while "
+                    f"{function.logical_id} Timeout is {timeout}s, while "
                     f"{carrier.logical_id} invokes it through a {flavour} API whose integration "
                     f"gives up at {limit}s. Required: at most {limit}s. Consequence: past {limit}s "
                     f"the caller receives 504 while the invocation runs on to completion, so a "

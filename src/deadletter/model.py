@@ -348,6 +348,14 @@ class StateMachine(Resource):
 
 @dataclass
 class Alarm(Resource):
+    """A CloudWatch alarm.
+
+    Naming a resource in `Dimensions` is not the same as watching it. An alarm
+    only tells somebody if it measures the right thing, is enabled, and has
+    somewhere to send the notification — so each of those is readable
+    separately rather than collapsed into "an alarm exists".
+    """
+
     @property
     def metric_name(self) -> str | None:
         value = self.prop("MetricName")
@@ -356,6 +364,46 @@ class Alarm(Resource):
     @property
     def dimensions(self) -> list[dict[str, Any]]:
         return [d for d in ensure_list(self.prop("Dimensions")) if isinstance(d, dict)]
+
+    @property
+    def actions_enabled(self) -> bool:
+        """CloudFormation defaults ActionsEnabled to true when it is absent."""
+        value = self.prop("ActionsEnabled")
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() != "false"
+        return True
+
+    @property
+    def alarm_actions(self) -> list[Any]:
+        return [action for action in ensure_list(self.prop("AlarmActions")) if action is not None]
+
+    @property
+    def threshold(self) -> float | None:
+        value = self.prop("Threshold")
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
+
+    @property
+    def comparison_operator(self) -> str | None:
+        value = self.prop("ComparisonOperator")
+        return value if isinstance(value, str) else None
+
+    @property
+    def fires_above_threshold(self) -> bool:
+        """True when the alarm is shaped to fire as the metric rises."""
+        return (self.comparison_operator or "").startswith("GreaterThan")
 
 
 @dataclass

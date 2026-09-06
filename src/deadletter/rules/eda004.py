@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import networkx as nx
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import Kind, Rule as EventRule
 from .base import Rule, register, remediation
 
@@ -15,7 +15,7 @@ FILTER_KEYS = ("source", "detail-type", "detail")
 @register
 class EDA004(Rule):
     id = "EDA004"
-    severity = Severity.BLOCK
+    impact = Impact.STALL
     title = "Recursive event loop"
     condition = "Any event that re-enters the hub it was delivered from."
 
@@ -77,8 +77,22 @@ class EDA004(Rule):
                 )
                 for edge in routes
             )
-            severity = Severity.WARN if all_routes_filtered else Severity.BLOCK
-            verdict = str(severity)
+            # A filter on every route may well break the cycle. Whether it does
+            # depends on values the consumer emits at runtime, which no
+            # template-only scan can read — so this rests on an assumption, and
+            # says so rather than quietly softening the wording.
+            # Never CONFIRMED: the return edge that closes a cycle is usually an
+            # IAM-derived publish, which shows the consumer *may* publish back,
+            # not that it does.
+            confidence = Confidence.ASSUMED if all_routes_filtered else Confidence.INFERRED
+            assumptions = (
+                [
+                    "The event values this cycle's consumers emit are not visible to a "
+                    "template scan, so no filter on the return path can be shown to exclude them."
+                ]
+                if all_routes_filtered
+                else []
+            )
             path = " -> ".join([*cycle, cycle[0]])
             guard = (
                 f"rule patterns filter on {', '.join(sorted(filters))}, but the emitted values are unknown"
@@ -111,10 +125,12 @@ class EDA004(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                severity=severity,
+                impact=self.impact,
+                confidence=confidence,
+                assumptions=assumptions,
                 title=self.title,
                 message=(
-                    f"{verdict}: events delivered from {hub} can return to it via {path}, while "
+                    f"events delivered from {hub} can return to it via {path}, while "
                     f"{guard}. Required: verify a filter excludes the consumer's own emissions, "
                     f"or remove the return edge. Consequence: each matching event can re-trigger "
                     f"the cycle, multiplying invocations and cost until throttling stops it."
@@ -127,7 +143,6 @@ class EDA004(Rule):
                     "carriers": carrier_names,
                     "analysis": "strongly-connected-component",
                 },
-                inferred=True,
                 patch_hint=(
                     f"Verify and update {fixes[0].path}." if fixes else "Remove the inferred publish return edge."
                 ),

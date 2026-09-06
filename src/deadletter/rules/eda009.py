@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import STREAM_SHARED_CONSUMER_LIMIT, Kind, Stream, Table
 from .base import Rule, register, remediation
 
@@ -10,7 +10,7 @@ from .base import Rule, register, remediation
 @register
 class EDA009(Rule):
     id = "EDA009"
-    severity = Severity.BLOCK
+    impact = Impact.STALL
     title = "Stream shard is read by too many shared-throughput consumers"
     condition = "Any sustained throughput near the shard's read limit."
 
@@ -57,10 +57,10 @@ class EDA009(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                severity=self.severity,
-                title=self.title,
+                impact=self.impact,
+                                title=self.title,
                 message=(
-                    f"BLOCK: {source.logical_id} is polled by {len(shared)} shared-throughput "
+                    f"{source.logical_id} is polled by {len(shared)} shared-throughput "
                     f"readers ({', '.join(readers)}), while {capacity} 2 MB/s across all of them. "
                     f"Required: at most {STREAM_SHARED_CONSUMER_LIMIT} shared readers, or enhanced "
                     f"fan-out for the rest. Consequence: their GetRecords calls compete for the "

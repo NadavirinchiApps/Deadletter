@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  The other EDA001 fixture (violating.yaml) has VisibilityTimeout 60 against a
+  30s Timeout: it clears AWS's constraint and only falls short of the 6x
+  recommendation. This one breaks the constraint itself — 10s of visibility for
+  a handler allowed to run 30s — so the message is guaranteed to reappear on the
+  queue while its first invocation is still working.
+Resources:
+  ChargeQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: charge-queue
+      VisibilityTimeout: 10
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ChargeDlq.Arn
+        maxReceiveCount: 5
+  ChargeDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: charge-dlq
+      MessageRetentionPeriod: 1209600
+  ChargeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.charge
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ChargeQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

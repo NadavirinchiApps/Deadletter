@@ -63,7 +63,7 @@ def test_eda002_accepts_an_sns_subscription_redrive_policy():
         """,
     )
 
-    assert found and all(str(finding.severity) != "BLOCK" for finding in found)
+    assert found and all(str(finding.verdict) != "BLOCK" for finding in found)
 
 
 def test_eda002_accepts_native_lambda_event_invoke_config():
@@ -97,7 +97,7 @@ def test_eda002_accepts_native_lambda_event_invoke_config():
         """,
     )
 
-    assert found and all(str(finding.severity) != "BLOCK" for finding in found)
+    assert found and all(str(finding.verdict) != "BLOCK" for finding in found)
 
 
 def test_eda002_treats_a_cross_stack_dlq_as_configured_not_absent():
@@ -165,7 +165,7 @@ def test_parameter_defaults_are_used_for_numeric_rule_inputs():
     assert graph.node("Consumer").timeout == 60
     found = list(get_rule("EDA001").check(graph))
     assert len(found) == 1
-    assert found[0].evidence["required_minimum"] == 360
+    assert found[0].evidence["recommended_minimum"] == 360
 
 
 def test_unresolved_numeric_input_is_reported_as_uncertain_not_blocked():
@@ -196,7 +196,7 @@ def test_unresolved_numeric_input_is_reported_as_uncertain_not_blocked():
     )
 
     assert len(found) == 1
-    assert str(found[0].severity) == "WARN"
+    assert str(found[0].verdict) == "WARN"
     assert "cannot verify" in found[0].message
 
 
@@ -274,7 +274,7 @@ def test_anything_but_on_an_unknown_emitted_field_does_not_suppress_a_loop():
     )
 
     assert len(found) == 1
-    assert str(found[0].severity) == "WARN"
+    assert str(found[0].verdict) == "WARN"
 
 
 def test_iam_actions_and_resources_are_scoped_to_the_same_statement():
@@ -371,7 +371,8 @@ def test_sns_publish_permissions_participate_in_loop_detection():
     )
 
     assert len(found) == 1
-    assert str(found[0].severity) == "BLOCK"
+    assert str(found[0].verdict) == "WARN"
+    assert found[0].inferred is True
 
 
 def test_api_events_connect_to_their_function_regardless_of_event_name():
@@ -449,7 +450,7 @@ def test_maximum_record_age_bounds_stream_blocking_but_requires_recovery():
     )
 
     assert len(found) == 1
-    assert str(found[0].severity) == "WARN"
+    assert str(found[0].verdict) == "WARN"
     assert "discarded" in found[0].message
 
 
@@ -518,7 +519,7 @@ def test_unknown_resource_condition_downgrades_a_block_to_warn():
 
     found = [finding for finding in run(graph) if finding.rule_id == "EDA001"]
     assert len(found) == 1
-    assert str(found[0].severity) == "WARN"
+    assert str(found[0].verdict) == "WARN"
     assert "Consumer" in found[0].evidence["conditional_resources"]
 
 
@@ -546,7 +547,8 @@ def test_default_event_bus_is_represented_for_loop_detection():
     )
 
     assert len(found) == 1
-    assert str(found[0].severity) == "BLOCK"
+    assert str(found[0].verdict) == "WARN"
+    assert found[0].inferred is True
 
 
 def test_source_aware_remediation_has_yaml_line_and_real_sam_path():

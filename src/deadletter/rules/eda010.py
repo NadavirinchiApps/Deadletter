@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import Kind, StateMachine
 from .base import Rule, register, remediation
 
@@ -20,7 +20,8 @@ CATCH_ALL = frozenset({"States.ALL", "States.TaskFailed"})
 @register
 class EDA010(Rule):
     id = "EDA010"
-    severity = Severity.BLOCK
+    impact = Impact.STALL
+    basis = Basis.RECOMMENDATION
     title = "Workflow task has no retry or catch path"
     condition = "Any transient error from the service the task calls."
 
@@ -70,10 +71,11 @@ class EDA010(Rule):
             )
             return Finding(
                 rule_id=self.id,
-                severity=self.severity,
-                title=self.title,
+                impact=self.impact,
+                                basis=self.basis,
+                                title=self.title,
                 message=(
-                    f"BLOCK: state {name} in {machine.logical_id} calls {target_id} with no Retry "
+                    f"state {name} in {machine.logical_id} calls {target_id} with no Retry "
                     f"and no Catch, while every call to it can fail transiently. Required: a Retry "
                     f"for the retryable errors and a Catch for the rest. Consequence: one "
                     f"throttle or service blip fails the whole execution, and the work already "
@@ -113,10 +115,12 @@ class EDA010(Rule):
             )
             return Finding(
                 rule_id=self.id,
-                severity=Severity.WARN,
+                impact=self.impact,
+                basis=self.basis,
+                confidence=Confidence.UNASSESSED,
                 title=self.title,
                 message=(
-                    f"WARN: state {name} in {machine.logical_id} calls {target_id} with a Catch "
+                    f"state {name} in {machine.logical_id} calls {target_id} with a Catch "
                     f"but no Retry, while the errors it catches include transient ones. Required: "
                     f"a Retry ahead of the catch. Consequence: a momentary throttle takes the "
                     f"failure path, so compensating logic runs for work that would have succeeded "
@@ -158,10 +162,12 @@ class EDA010(Rule):
         )
         return Finding(
             rule_id=self.id,
-            severity=Severity.WARN,
+            impact=self.impact,
+            basis=self.basis,
+            confidence=Confidence.UNASSESSED,
             title=self.title,
             message=(
-                f"WARN: state {name} in {machine.logical_id} retries {', '.join(sorted(covered))} "
+                f"state {name} in {machine.logical_id} retries {', '.join(sorted(covered))} "
                 f"when calling {target_id}, while {', '.join(missing)} "
                 f"{'is' if len(missing) == 1 else 'are'} not retried. Required: every transient "
                 f"Lambda error, or States.ALL. Consequence: the untried errors still fail the "

@@ -1,0 +1,10 @@
+{
+  "name": "deadletter-benchmark",
+  "private": true,
+  "description": "Runs cdk-nag's AwsSolutions pack over the Deadletter fixtures. See ../benchmark.md",
+  "dependencies": {
+    "aws-cdk-lib": "^2.268.0",
+    "cdk-nag": "^2.38.2",
+    "constructs": "^10.8.1"
+  }
+}

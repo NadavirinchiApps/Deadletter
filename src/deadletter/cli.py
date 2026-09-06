@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__, build, load
+from .coverage import collect as collect_coverage
 from .discover import resolve
-from .findings import Finding, Severity
+from .findings import POLICIES, Finding, Verdict
 from .report import render_json, render_sarif, render_text
 from .rules import all_rules, run
 from .suppress import collect
@@ -40,10 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="run only this rule; repeat for multiple rules",
     )
     parser.add_argument(
+        "--policy",
+        choices=sorted(POLICIES),
+        default="default",
+        help=(
+            "which findings are allowed to BLOCK: 'default' blocks only confirmed "
+            "violations of AWS requirements; 'strict' also blocks recommended "
+            "safeguards and IAM-inferred findings; 'advisory' blocks nothing "
+            "(default: default)"
+        ),
+    )
+    parser.add_argument(
         "--fail-on",
         choices=("BLOCK", "WARN", "INFO", "none"),
         default="BLOCK",
-        help="exit 1 when this severity or worse is found (default: BLOCK)",
+        help="exit 1 when this verdict or worse is found (default: BLOCK)",
     )
     parser.add_argument(
         "--output",
@@ -93,6 +105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     findings: list[Finding] = []
     graphs = []
+    unreadable: list[tuple[str, str]] = []
     for target in targets:
         path = target.path
         try:
@@ -101,9 +114,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if target.explicit:
                 print(f"ERROR: {path}: {error}", file=sys.stderr)
                 return 2
-            continue  # discovered by walking, and it turned out not to be a template
+            # Discovered by walking and it turned out not to be a template. Not
+            # an error, but the reader has to know it went unread.
+            unreadable.append((str(path), type(error).__name__))
+            continue
         graphs.append(graph)
-        findings.extend(run(graph, args.rules))
+        findings.extend(run(graph, args.rules, policy=POLICIES[args.policy]))
         # A suppression that does not parse must never be mistaken for one that
         # was honoured, so say so on stderr and leave the finding standing.
         for problem in collect(graph.template)[1]:
@@ -113,14 +129,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("ERROR: no template could be read", file=sys.stderr)
         return 2
 
+    coverage = collect_coverage(
+        graphs,
+        rules_run=args.rules or [rule.id for rule in all_rules()],
+        unreadable=unreadable,
+        roots=args.templates,
+    )
+
     if args.format == "json":
-        output = render_json(findings)
+        output = render_json(findings, coverage)
     elif args.format == "sarif":
         output = render_sarif(findings)
     elif args.format == "mermaid":
         output = graphs[0].to_mermaid()
     else:
-        output = render_text(findings, show_suppressed=args.show_suppressed)
+        output = render_text(
+            findings, show_suppressed=args.show_suppressed, coverage=coverage
+        )
     if args.output:
         try:
             args.output.write_text(output + "\n", encoding="utf-8")
@@ -136,9 +161,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _threshold_met(findings: list[Finding], fail_on: str) -> bool:
     if fail_on == "none":
         return False
-    threshold = Severity(fail_on)
+    threshold = Verdict(fail_on)
     return any(
-        finding.severity.rank <= threshold.rank
+        finding.verdict.rank <= threshold.rank
         for finding in findings
         if not finding.suppressed
     )

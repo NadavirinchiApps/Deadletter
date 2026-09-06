@@ -8,7 +8,7 @@ their evidence and are always marked inferred.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import networkx as nx
 
@@ -19,6 +19,32 @@ from .parse import Template
 
 DELIVERY_EDGES = frozenset({"poll", "rule_target", "subscribe", "invoke"})
 FAILURE_EDGES = frozenset({"redrive", "dlq", "on_failure"})
+
+# The SQS metrics that tell an operator a queue is holding messages. Anything
+# else on a queue (empty receives, sent-message counts) says nothing about a
+# backlog and must not be counted as depth monitoring.
+SQS_DEPTH_METRICS = frozenset(
+    {
+        "ApproximateNumberOfMessagesVisible",
+        "ApproximateNumberOfMessagesNotVisible",
+        "ApproximateAgeOfOldestMessage",
+    }
+)
+
+
+@dataclass(frozen=True)
+class AlarmAssessment:
+    """An alarm on a resource, and the reasons it cannot raise anybody."""
+
+    alarm: m.Alarm
+    defects: tuple[str, ...] = ()
+
+    @property
+    def effective(self) -> bool:
+        return not self.defects
+
+    def describe(self) -> str:
+        return f"{self.alarm.logical_id} {'; '.join(self.defects)}"
 
 _SAM_POLICY_ACTIONS: dict[str, tuple[str, ...]] = {
     "EventBridgePutEventsPolicy": ("events:putevents",),
@@ -337,8 +363,8 @@ class EventGraph:
     def alarms_on(self, logical_id: str) -> list[m.Alarm]:
         """Alarms whose dimensions name this resource.
 
-        An operator watching queue depth is not a drain, but it is the
-        difference between a silent backlog and a paged human.
+        Membership only. A rule that treats this as evidence somebody is told
+        is making a claim this method does not support — use `alarm_coverage`.
         """
         resource = self.template.get(logical_id)
         name_hint = resource.name_hint if resource is not None else None
@@ -355,6 +381,36 @@ class EventGraph:
                     found.append(alarm)
                     break
         return found
+
+    def alarm_coverage(
+        self, logical_id: str, metrics: Iterable[str]
+    ) -> list["AlarmAssessment"]:
+        """Assess whether each alarm on this resource can actually notify anyone.
+
+        An alarm that names the right resource but measures an unrelated metric,
+        has its actions disabled, or has no action to take is indistinguishable
+        from no alarm at all when the queue starts filling. Reporting it as
+        coverage is how a scanner tells somebody they are safe when they are not.
+        """
+        wanted = frozenset(metrics)
+        assessments: list[AlarmAssessment] = []
+        for alarm in self.alarms_on(logical_id):
+            defects: list[str] = []
+            metric = alarm.metric_name
+            if metric is None:
+                defects.append("has no resolvable MetricName")
+            elif metric not in wanted:
+                defects.append(
+                    f"watches {metric}, not {' or '.join(sorted(wanted))}"
+                )
+            if not alarm.actions_enabled:
+                defects.append("has ActionsEnabled set to false")
+            if not alarm.alarm_actions:
+                defects.append("has no AlarmActions, so it notifies nobody")
+            assessments.append(
+                AlarmAssessment(alarm=alarm, defects=tuple(defects))
+            )
+        return assessments
 
     def invoke_configs_for(self, function_id: str) -> list[m.EventInvokeConfig]:
         configs: list[m.EventInvokeConfig] = []

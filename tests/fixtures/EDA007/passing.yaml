@@ -6,6 +6,10 @@ Description: >
   is throttled at the event source with ScalingConfig. ReportFunction writes to an
   on-demand table, which has no fixed ceiling to exceed.
 Resources:
+  OncallTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: oncall
   EventsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -72,6 +76,8 @@ Resources:
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref OncallTopic
   IngestFunction:
     Type: AWS::Serverless::Function
     Properties:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import EventSourceMapping, Kind
 from .base import Rule, register, remediation
 
@@ -10,7 +10,7 @@ from .base import Rule, register, remediation
 @register
 class EDA003(Rule):
     id = "EDA003"
-    severity = Severity.BLOCK
+    impact = Impact.DUPLICATION
     title = "Batch reprocessed wholesale on a single record failure"
     condition = "Any batch in which at least one record fails."
 
@@ -22,10 +22,11 @@ class EDA003(Rule):
             if batch_size is None and esm.batch_size_declared:
                 yield Finding(
                     rule_id=self.id,
-                    severity=Severity.WARN,
+                    impact=self.impact,
+                    confidence=Confidence.UNASSESSED,
                     title=self.title,
                     message=(
-                        f"WARN: {esm.logical_id} BatchSize is unresolved, so Deadletter cannot "
+                        f"{esm.logical_id} BatchSize is unresolved, so Deadletter cannot "
                         f"verify whether whole-batch retries can replay successful records. "
                         f"Required: resolve BatchSize and configure ReportBatchItemFailures when "
                         f"it exceeds 1. Consequence: duplicate side effects may be hidden."
@@ -51,10 +52,10 @@ class EDA003(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                severity=self.severity,
-                title=self.title,
+                impact=self.impact,
+                                title=self.title,
                 message=(
-                    f"BLOCK: {esm.logical_id} BatchSize is {batch_size}, while "
+                    f"{esm.logical_id} BatchSize is {batch_size}, while "
                     f"FunctionResponseTypes is {esm.function_response_types or 'unset'}. "
                     f"Required: ReportBatchItemFailures. Consequence: one failing record "
                     f"fails the whole batch, so up to {batch_size - 1} records that already "

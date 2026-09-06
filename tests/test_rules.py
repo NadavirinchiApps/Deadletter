@@ -1,9 +1,9 @@
-"""One test per BLOCK rule, plus the numbers each message must quote."""
+"""One test per rule, plus the numbers each message must quote."""
 
 from __future__ import annotations
 
 from deadletter import build, load
-from deadletter.findings import Severity
+from deadletter.findings import Basis, Confidence, Verdict
 from deadletter.rules import all_rules, run
 
 from conftest import FIXTURES, assert_rule
@@ -21,13 +21,42 @@ def test_every_rule_states_the_condition_it_needs_to_bite():
         assert rule.condition, f"{rule.id} does not state its condition"
 
 
-def test_eda001_computes_the_required_minimum():
+def test_eda001_reports_the_6x_shortfall_as_a_recommendation_not_a_violation():
+    """VisibilityTimeout 60 against a 30s Timeout satisfies what AWS actually
+    requires and only misses the 6x advice. Blocking a release over that spends
+    credibility the rule needs for the case that is genuinely broken."""
     finding = assert_rule("EDA001")[0]
     # 6 x 30s timeout + 10s batching window
-    assert finding.evidence["required_minimum"] == 190
+    assert finding.evidence["recommended_minimum"] == 190
+    assert finding.evidence["aws_minimum"] == 30
+    assert finding.evidence["aws_minimum_satisfied"] is True
     assert "60s" in finding.message and "190s" in finding.message
-    assert finding.severity is Severity.BLOCK
+    assert finding.basis is Basis.RECOMMENDATION
+    assert finding.verdict is Verdict.WARN
     assert "VisibilityTimeout: 190" in finding.patch_hint
+
+
+def test_eda001_blocks_when_the_aws_constraint_itself_is_broken():
+    """VisibilityTimeout below the consumer's Timeout is the constraint AWS
+    imposes, not advice — this is the case that earns a BLOCK."""
+    graph = build(load(FIXTURES / "EDA001" / "violating-requirement.yaml"))
+    findings = [f for f in run(graph) if f.rule_id == "EDA001"]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.basis is Basis.REQUIREMENT
+    assert finding.confidence is Confidence.CONFIRMED
+    assert finding.verdict is Verdict.BLOCK
+    assert finding.evidence["aws_minimum"] == 30
+    assert "10s" in finding.message and "30s" in finding.message
+
+
+def test_eda001_recommendation_blocks_only_when_the_team_asks_for_it():
+    """The strict policy is how a team opts into enforcing AWS's advice."""
+    from deadletter.findings import STRICT_POLICY
+
+    graph = build(load(FIXTURES / "EDA001" / "violating.yaml"))
+    strict = [f for f in run(graph, policy=STRICT_POLICY) if f.rule_id == "EDA001"]
+    assert strict and all(f.verdict is Verdict.BLOCK for f in strict)
 
 
 def test_eda002_catches_both_the_queue_and_the_async_target():
@@ -42,9 +71,12 @@ def test_eda003_names_how_many_records_get_replayed():
     assert "up to 9 records" in finding.message
 
 
-def test_eda004_blocks_an_unfiltered_loop():
+def test_eda004_reports_an_unfiltered_loop_as_inferred():
+    """The return edge that closes a cycle is an IAM-derived publish: it shows
+    the consumer may publish back, not that it does."""
     finding = assert_rule("EDA004")[0]
-    assert finding.severity is Severity.BLOCK
+    assert finding.confidence is Confidence.INFERRED
+    assert finding.verdict is Verdict.WARN
     assert finding.evidence["hub"] == "AuditBus"
     assert finding.inferred is True
 
@@ -53,7 +85,10 @@ def test_eda004_downgrades_a_filtered_loop_rather_than_crying_wolf():
     """The orders workload has a real cycle, but the rule pattern filters on
     detail-type — unprovable, so WARN. A false BLOCK costs more than a miss."""
     findings = [f for f in run(build(load(FIXTURES / "orders" / "template.yaml"))) if f.rule_id == "EDA004"]
-    assert findings and all(f.severity is Severity.WARN for f in findings)
+    assert findings and all(f.verdict is Verdict.WARN for f in findings)
+    assert all(f.confidence is Confidence.ASSUMED for f in findings)
+    # An assumption-dependent finding has to say what it assumes.
+    assert all(f.assumptions for f in findings)
     assert "detail-type" in findings[0].evidence["pattern_filters"]
 
 
@@ -67,7 +102,8 @@ def test_eda006_names_the_producers_that_feed_the_undrained_queue():
     finding = assert_rule("EDA006")[0]
     assert finding.evidence["dead_letter_producers"] == ["PaymentQueue"]
     assert "PaymentDlq" in finding.message
-    assert finding.severity is Severity.BLOCK
+    assert finding.basis is Basis.RECOMMENDATION
+    assert finding.verdict is Verdict.WARN
 
 
 def test_eda006_stays_quiet_when_an_alarm_watches_an_undrained_queue():

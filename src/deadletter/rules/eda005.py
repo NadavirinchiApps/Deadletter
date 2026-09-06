@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import EventSourceMapping, Kind
 from .base import Rule, register, remediation
 
@@ -12,7 +12,7 @@ STREAM_SOURCES = {Kind.STREAM, Kind.TABLE}
 @register
 class EDA005(Rule):
     id = "EDA005"
-    severity = Severity.BLOCK
+    impact = Impact.STALL
     title = "Poison record blocks the shard until expiry"
     condition = "Any record the consumer cannot process."
 
@@ -37,10 +37,11 @@ class EDA005(Rule):
             if unresolved:
                 yield Finding(
                     rule_id=self.id,
-                    severity=Severity.WARN,
+                    impact=self.impact,
+                    confidence=Confidence.UNASSESSED,
                     title=self.title,
                     message=(
-                        f"WARN: {esm.logical_id} has an unresolved stream retry or record-age "
+                        f"{esm.logical_id} has an unresolved stream retry or record-age "
                         f"limit. Required: verify MaximumRetryAttempts or MaximumRecordAgeInSeconds "
                         f"is finite. Consequence: an unbounded poison record can pause its shard."
                     ),
@@ -78,17 +79,20 @@ class EDA005(Rule):
                     "Destination": {"Fn::GetAtt": [f"{esm.origin or esm.logical_id}FailureDlq", "Arn"]}
                 },
             )
-            severity = Severity.BLOCK if not bounded else Severity.WARN
+            # Unbounded, the shard stops behind the record. Bounded, the shard
+            # recovers and the record is destroyed instead — different failure,
+            # not a milder one.
+            impact = Impact.LOSS if bounded else Impact.STALL
             if bounded:
                 message = (
-                    f"WARN: {esm.logical_id} has a finite retry/record-age limit but no OnFailure "
+                    f"{esm.logical_id} has a finite retry/record-age limit but no OnFailure "
                     f"destination. Required: preserve discarded records in SQS or SNS. Consequence: "
                     f"the shard recovers, but the poison record is discarded without a replay path."
                 )
                 fixes = [destination_fix]
             else:
                 message = (
-                    f"BLOCK: {esm.logical_id} reads from {source.logical_id} with "
+                    f"{esm.logical_id} reads from {source.logical_id} with "
                     f"MaximumRetryAttempts {retries if retries is not None else 'unset (infinite)'} "
                     f"and MaximumRecordAgeInSeconds "
                     f"{record_age if record_age is not None else 'unset (infinite)'}. Required: a "
@@ -99,7 +103,7 @@ class EDA005(Rule):
                 fixes = [retry_fix, destination_fix]
             yield Finding(
                 rule_id=self.id,
-                severity=severity,
+                impact=impact,
                 title=self.title,
                 message=message,
                 resources=[esm.logical_id, source.logical_id, target.logical_id],

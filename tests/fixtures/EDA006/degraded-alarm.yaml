@@ -1,47 +1,44 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Two dead-letter queues, both accounted for. PaymentDlq has a redrive consumer
-  that pulls messages back out. ShippingDlq has no consumer but is alarmed on
-  depth with an enabled action, so a human is told while the messages are
-  still there. An alarm naming the queue but unable to notify anyone does not
-  count as coverage — see degraded-alarm.yaml.
+  Regression fixture. Every dead-letter queue here has an alarm that names it,
+  and not one of those alarms can tell anybody the queue is filling:
+
+    WrongMetricAlarm   measures empty receives, which says nothing about depth
+    DisabledAlarm      measures depth, with ActionsEnabled false
+    NoActionAlarm      measures depth, enabled, with nowhere to send anything
+
+  Matching on the dimension alone reports all three as coverage and returns no
+  findings — which is how a scanner tells somebody they are safe when the
+  messages are about to expire.
 Resources:
   OncallTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: oncall
-  PaymentQueue:
+
+  WrongMetricQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: payment-queue
+      QueueName: wrong-metric-queue
       VisibilityTimeout: 300
       RedrivePolicy:
-        deadLetterTargetArn: !GetAtt PaymentDlq.Arn
+        deadLetterTargetArn: !GetAtt WrongMetricDlq.Arn
         maxReceiveCount: 5
-  PaymentDlq:
+  WrongMetricDlq:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: payment-dlq
-      VisibilityTimeout: 300
+      QueueName: wrong-metric-dlq
       MessageRetentionPeriod: 1209600
-      RedrivePolicy:
-        deadLetterTargetArn: !GetAtt ParkingLotQueue.Arn
-        maxReceiveCount: 3
-  ParkingLotQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: parking-lot
-      MessageRetentionPeriod: 1209600
-  ParkingLotAlarm:
+  WrongMetricAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: parking-lot-not-empty
+      AlarmName: wrong-metric
       Namespace: AWS/SQS
-      MetricName: ApproximateNumberOfMessagesVisible
+      MetricName: NumberOfEmptyReceives
       Dimensions:
         - Name: QueueName
-          Value: !GetAtt ParkingLotQueue.QueueName
+          Value: !GetAtt WrongMetricDlq.QueueName
       Statistic: Maximum
       Period: 300
       EvaluationPeriods: 1
@@ -50,75 +47,106 @@ Resources:
       ActionsEnabled: true
       AlarmActions:
         - !Ref OncallTopic
-  ShippingQueue:
+
+  DisabledQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: shipping-queue
+      QueueName: disabled-queue
       VisibilityTimeout: 300
       RedrivePolicy:
-        deadLetterTargetArn: !GetAtt ShippingDlq.Arn
+        deadLetterTargetArn: !GetAtt DisabledDlq.Arn
         maxReceiveCount: 5
-  ShippingDlq:
+  DisabledDlq:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: shipping-dlq
+      QueueName: disabled-dlq
       MessageRetentionPeriod: 1209600
-  ShippingDlqDepthAlarm:
+  DisabledAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: shipping-dlq-not-empty
+      AlarmName: disabled
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
         - Name: QueueName
-          Value: !GetAtt ShippingDlq.QueueName
+          Value: !GetAtt DisabledDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      ActionsEnabled: false
+      AlarmActions:
+        - !Ref OncallTopic
+
+  NoActionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: no-action-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NoActionDlq.Arn
+        maxReceiveCount: 5
+  NoActionDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: no-action-dlq
+      MessageRetentionPeriod: 1209600
+  NoActionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: no-action
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt NoActionDlq.QueueName
       Statistic: Maximum
       Period: 300
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       ActionsEnabled: true
-      AlarmActions:
-        - !Ref OncallTopic
-  SettlePaymentFunction:
+
+  DrainWrongMetric:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: app.settle
+      Handler: app.handle
       Runtime: python3.12
       Timeout: 30
       Events:
         FromQueue:
           Type: SQS
           Properties:
-            Queue: !GetAtt PaymentQueue.Arn
+            Queue: !GetAtt WrongMetricQueue.Arn
             BatchSize: 1
             FunctionResponseTypes:
               - ReportBatchItemFailures
-  RedrivePaymentDlqFunction:
+  DrainDisabled:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: app.redrive
-      Runtime: python3.12
-      Timeout: 30
-      Events:
-        FromDlq:
-          Type: SQS
-          Properties:
-            Queue: !GetAtt PaymentDlq.Arn
-            BatchSize: 1
-            FunctionResponseTypes:
-              - ReportBatchItemFailures
-  ShipOrderFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Handler: app.ship
+      Handler: app.handle
       Runtime: python3.12
       Timeout: 30
       Events:
         FromQueue:
           Type: SQS
           Properties:
-            Queue: !GetAtt ShippingQueue.Arn
+            Queue: !GetAtt DisabledQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+  DrainNoAction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handle
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NoActionQueue.Arn
             BatchSize: 1
             FunctionResponseTypes:
               - ReportBatchItemFailures

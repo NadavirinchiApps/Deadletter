@@ -11,7 +11,9 @@ from conftest import FIXTURES
 
 
 def test_json_cli_report_and_blocking_exit_code(capsys):
-    path = FIXTURES / "EDA001" / "violating.yaml"
+    # A confirmed violation of an AWS constraint — the only shape that blocks
+    # under the default policy.
+    path = FIXTURES / "EDA001" / "violating-requirement.yaml"
 
     exit_code = main([str(path), "--format", "json"])
 
@@ -69,7 +71,9 @@ def test_report_text_reaches_stdout_as_utf8(monkeypatch):
     raw = io.BytesIO()
     monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
 
-    exit_code = main([str(FIXTURES / "EDA001" / "violating.yaml"), "--fail-on", "none"])
+    exit_code = main(
+        [str(FIXTURES / "EDA001" / "violating-requirement.yaml"), "--fail-on", "none"]
+    )
     sys.stdout.flush()
 
     assert exit_code == 0
@@ -77,7 +81,7 @@ def test_report_text_reaches_stdout_as_utf8(monkeypatch):
 
 
 def test_cli_can_write_a_report_file(capsys, tmp_path: Path):
-    path = FIXTURES / "EDA001" / "violating.yaml"
+    path = FIXTURES / "EDA001" / "violating-requirement.yaml"
     output = tmp_path / "report.json"
 
     exit_code = main(

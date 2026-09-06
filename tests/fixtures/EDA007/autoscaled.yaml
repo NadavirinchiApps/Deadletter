@@ -1,9 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  IngestFunction is polled by a queue with no MaximumConcurrency and has no
-  reserved concurrency, so Lambda will scale it to the account limit. It writes
-  into a table pinned at 5 write capacity units with no scaling target.
+  Same shape as violating.yaml, with an Application Auto Scaling target on the
+  table's write capacity.
+
+  The rule used to return early here: a scaling target existed, so the ceiling
+  was treated as movable. AWS documents that scaling reacts over minutes and
+  stops at MaxCapacity, so it does not absorb a burst that arrives in seconds.
+  The target belongs in the finding's assumptions, where a reader can weigh it.
 Resources:
   OncallTopic:
     Type: AWS::SNS::Topic
@@ -23,6 +27,15 @@ Resources:
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
+  EventsTableWriteTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: dynamodb
+      ScalableDimension: "dynamodb:table:WriteCapacityUnits"
+      ResourceId: !Sub "table/${EventsTable}"
+      MinCapacity: 5
+      MaxCapacity: 40
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable"
   IngestQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -50,6 +63,7 @@ Resources:
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
+      ActionsEnabled: true
       AlarmActions:
         - !Ref OncallTopic
   IngestFunction:

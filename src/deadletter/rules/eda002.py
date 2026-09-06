@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import Function, Kind
 from .base import Rule, register, remediation
 
@@ -10,7 +10,8 @@ from .base import Rule, register, remediation
 @register
 class EDA002(Rule):
     id = "EDA002"
-    severity = Severity.BLOCK
+    impact = Impact.LOSS
+    basis = Basis.RECOMMENDATION
     title = "Incomplete dead-letter coverage for a failing delivery"
     condition = "Any consumer failure that exhausts retries."
 
@@ -38,10 +39,11 @@ class EDA002(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                severity=self.severity,
-                title=self.title,
+                impact=self.impact,
+                                basis=self.basis,
+                                title=self.title,
                 message=(
-                    f"BLOCK: {queue.logical_id} has no RedrivePolicy, while it is consumed by "
+                    f"{queue.logical_id} has no RedrivePolicy, while it is consumed by "
                     f"{names}. Required: a RedrivePolicy naming a dead-letter queue. "
                     f"Consequence: a message that always fails is retried until "
                     f"MessageRetentionPeriod expires and is then deleted with no record, "
@@ -135,7 +137,14 @@ class EDA002(Rule):
                             ),
                         )
                     )
-                severity = Severity.BLOCK if not transport_dlq and not execution_dlq else Severity.WARN
+                # Neither layer covered means the event is lost outright. One
+                # layer covered is a hole in a net that exists — real, but not
+                # the same claim.
+                impact = (
+                    Impact.LOSS
+                    if not transport_dlq and not execution_dlq
+                    else Impact.DEGRADED
+                )
                 if transport_dlq:
                     gap = "the delivery service has a DLQ but Lambda execution failures have no destination"
                 elif execution_dlq:
@@ -144,10 +153,11 @@ class EDA002(Rule):
                     gap = "neither the delivery service nor Lambda has a dead-letter destination"
                 yield Finding(
                     rule_id=self.id,
-                    severity=severity,
+                    basis=self.basis,
+                    impact=impact,
                     title=self.title,
                     message=(
-                        f"{severity}: {carrier} delivers to {function.logical_id} asynchronously, "
+                        f"{carrier} delivers to {function.logical_id} asynchronously, "
                         f"while {gap}. Required: dead-letter coverage for both transport failure "
                         f"and post-acceptance Lambda execution failure. Consequence: an event can "
                         f"be discarded at the uncovered stage with no replay path."

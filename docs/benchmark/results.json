@@ -1,0 +1,240 @@
+[
+  {
+    "rule": "EDA001",
+    "defect": "SQS visibility timeout is shorter than its consumer's timeout",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 5,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 3,
+    "cdknag_ids": [
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA002",
+    "defect": "async delivery path has no dead-letter destination",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 7,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 2,
+    "cdknag_ids": [
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA003",
+    "defect": "batch size > 1 without ReportBatchItemFailures replays succeeded records",
+    "deadletter": true,
+    "deadletter_verdict": "BLOCK",
+    "checkov_total": 5,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 3,
+    "cdknag_ids": [
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA004",
+    "defect": "events can re-enter the hub that delivered them (recursive loop)",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 4,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 2,
+    "cdknag_ids": [
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA005",
+    "defect": "unbounded stream retries let one poison record block a shard",
+    "deadletter": true,
+    "deadletter_verdict": "BLOCK",
+    "checkov_total": 4,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_43"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 1,
+    "cdknag_ids": [
+      "__include_error__"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA006",
+    "defect": "dead-letter queue has no consumer and no working alarm",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 5,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 3,
+    "cdknag_ids": [
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA007",
+    "defect": "consumer concurrency ceiling outruns the table's write capacity",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 8,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_119",
+      "CKV_AWS_26",
+      "CKV_AWS_27",
+      "CKV_AWS_28"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 5,
+    "cdknag_ids": [
+      "AwsSolutions-DDB3",
+      "AwsSolutions-SNS3",
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA008",
+    "defect": "dead-letter queue retention is shorter than its source queue's",
+    "deadletter": true,
+    "deadletter_verdict": "BLOCK",
+    "checkov_total": 5,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 3,
+    "cdknag_ids": [
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA009",
+    "defect": "more shared-throughput readers on a shard than it can serve",
+    "deadletter": true,
+    "deadletter_verdict": "BLOCK",
+    "checkov_total": 14,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_27",
+      "CKV_AWS_43"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 3,
+    "cdknag_ids": [
+      "AwsSolutions-KDS1",
+      "AwsSolutions-SQS3",
+      "AwsSolutions-SQS4"
+    ],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA010",
+    "defect": "workflow task has no retry or catch for documented transient errors",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 6,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 0,
+    "cdknag_ids": [],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA011",
+    "defect": "handler timeout exceeds the API Gateway integration timeout",
+    "deadletter": true,
+    "deadletter_verdict": "BLOCK",
+    "checkov_total": 3,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 0,
+    "cdknag_ids": [],
+    "cdknag_hit": false
+  },
+  {
+    "rule": "EDA012",
+    "defect": "events are published to a hub with no delivery route",
+    "deadletter": true,
+    "deadletter_verdict": "WARN",
+    "checkov_total": 5,
+    "checkov_ids": [
+      "CKV_AWS_115",
+      "CKV_AWS_116",
+      "CKV_AWS_117",
+      "CKV_AWS_173",
+      "CKV_AWS_26"
+    ],
+    "checkov_hit": false,
+    "cdknag_total": 1,
+    "cdknag_ids": [
+      "AwsSolutions-SNS3"
+    ],
+    "cdknag_hit": false
+  }
+]

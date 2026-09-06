@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ShippingDlqDepthAlarm is a real alarm: right metric, enabled, with somewhere
+  to send the notification. It simply does not fire until 5000 messages have
+  piled up on a queue nothing drains.
+
+  Whether that matters depends entirely on how fast the queue fills, which no
+  template states — so this is reported as an assumption the reader can accept
+  or reject, never as a violation.
+Resources:
+  OncallTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: oncall
+  ShippingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: shipping-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ShippingDlq.Arn
+        maxReceiveCount: 5
+  ShippingDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: shipping-dlq
+      MessageRetentionPeriod: 1209600
+  ShippingDlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: shipping-dlq-deep
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ShippingDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref OncallTopic
+  ShipOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.ship
+      Runtime: python3.12
+      Timeout: 30
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ShippingQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures

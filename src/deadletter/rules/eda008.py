@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..findings import Finding, Severity
+from ..findings import Basis, Confidence, Finding, Impact
 from ..model import Queue
 from .base import Rule, register, remediation
 
@@ -12,7 +12,7 @@ SQS_MAX_RETENTION = 1_209_600  # 14 days
 @register
 class EDA008(Rule):
     id = "EDA008"
-    severity = Severity.BLOCK
+    impact = Impact.LOSS
     title = "Dead-letter queue retention is shorter than its source"
     condition = "Any message that fails late in the source queue's retention window."
 
@@ -41,10 +41,11 @@ class EDA008(Rule):
                 ]
                 yield Finding(
                     rule_id=self.id,
-                    severity=Severity.WARN,
+                    impact=self.impact,
+                    confidence=Confidence.UNASSESSED,
                     title=self.title,
                     message=(
-                        f"WARN: cannot verify that {dlq.logical_id} outlives {source.logical_id} "
+                        f"cannot verify that {dlq.logical_id} outlives {source.logical_id} "
                         f"because {', '.join(unknown)} is unresolved. Required: resolve the "
                         f"deployment value and verify the dead-letter queue retains messages "
                         f"longer than its source. Consequence: a late failure can be deleted from "
@@ -67,7 +68,10 @@ class EDA008(Rule):
                 continue
 
             equal = dlq_retention == source_retention
-            severity = Severity.WARN if equal else self.severity
+            # Strictly longer is the advice. Equal is not a violation of
+            # anything AWS enforces, so it is reported as the recommendation it
+            # is; shorter is arithmetic on documented redrive behaviour.
+            basis = Basis.RECOMMENDATION if equal else Basis.REQUIREMENT
             both_default = not source.message_retention_declared and not dlq.message_retention_declared
             if equal:
                 exposure = (
@@ -97,10 +101,11 @@ class EDA008(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                severity=severity,
+                impact=self.impact,
+                basis=basis,
                 title=self.title,
                 message=(
-                    f"{severity}: {dlq.logical_id} MessageRetentionPeriod is {dlq_retention}s, "
+                    f"{dlq.logical_id} MessageRetentionPeriod is {dlq_retention}s, "
                     f"while its source {source.logical_id} retains messages for "
                     f"{source_retention}s. Required: more than {source_retention}s, up to the "
                     f"{SQS_MAX_RETENTION}s maximum. Consequence: redrive does not reset a "

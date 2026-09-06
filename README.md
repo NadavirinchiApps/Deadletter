@@ -14,24 +14,59 @@ credentials or access to a cloud account.
 
 ## What it detects
 
-| Rule | Severity | Defect |
+| Rule | Impact | Defect |
 |---|---|---|
-| EDA001 | BLOCK/WARN | SQS visibility timeout is unsafe for the connected Lambda timeout |
-| EDA002 | BLOCK/WARN | A polled or asynchronous delivery has missing or partial dead-letter coverage |
-| EDA003 | BLOCK/WARN | A failed item replays an entire batch because partial failure reporting is absent |
-| EDA004 | BLOCK/WARN | A function can publish back into the bus or topic that invoked it |
-| EDA005 | BLOCK/WARN | A stream poison record can block a shard or be discarded without recovery |
-| EDA006 | BLOCK | A dead-letter queue has no consumer and no alarm, so what lands there expires unseen |
-| EDA007 | BLOCK | An unbounded consumer writes into a provisioned table that cannot absorb its burst |
-| EDA008 | BLOCK/WARN | A dead-letter queue expires messages sooner than the queue that feeds it |
-| EDA009 | BLOCK | More shared-throughput readers on a stream shard than its read budget serves |
-| EDA010 | BLOCK/WARN | A workflow task treats a transient error as final, with no retry or catch |
-| EDA011 | BLOCK/WARN | A synchronous handler may outlive the API integration timeout waiting on it |
-| EDA012 | BLOCK | Events are published to a topic or bus that routes them nowhere |
+| EDA001 | duplication | SQS visibility timeout is unsafe for the connected Lambda timeout |
+| EDA002 | loss | A polled or asynchronous delivery has missing or partial dead-letter coverage |
+| EDA003 | duplication | A failed item replays an entire batch because partial failure reporting is absent |
+| EDA004 | stall | A function can publish back into the bus or topic that invoked it |
+| EDA005 | stall / loss | A stream poison record can block a shard or be discarded without recovery |
+| EDA006 | loss | A dead-letter queue has no consumer and no working alarm, so what lands there expires unseen |
+| EDA007 | stall | A consumer's concurrency ceiling outruns a provisioned table's write capacity |
+| EDA008 | loss | A dead-letter queue expires messages sooner than the queue that feeds it |
+| EDA009 | stall | More shared-throughput readers on a stream shard than its read budget serves |
+| EDA010 | stall | A workflow task treats a transient error as final, with no retry or catch |
+| EDA011 | duplication | A synchronous handler may outlive the API integration timeout waiting on it |
+| EDA012 | loss | Events are published to a topic or bus that routes them nowhere |
 
-`BLOCK` is reserved for a relationship Deadletter can establish from the
-template. Filtered or conditionally deployed paths are downgraded to `WARN`
-when runtime values are required to prove the failure.
+For how these compare against Checkov and cdk-nag on the same templates, see
+[docs/benchmark.md](docs/benchmark.md). Two of the twelve overlap with checks
+those tools already run; ten do not.
+
+## Findings say how well they are known
+
+A severe possible outcome does not make the evidence certain, and a departure
+from a recommendation is not a violation. Collapsing those into one severity is
+how a scanner blocks a release it should not have, and gets removed from the
+pipeline.
+
+Every finding carries three separate facts, and the verdict is computed from
+them rather than chosen by the rule:
+
+| Axis | Values | Means |
+|---|---|---|
+| `impact` | `LOSS` `STALL` `DUPLICATION` `DEGRADED` | what breaks if the condition holds |
+| `confidence` | `CONFIRMED` `INFERRED` `ASSUMED` `UNASSESSED` | how well we know it holds |
+| `basis` | `REQUIREMENT` `RECOMMENDATION` | AWS's rule, or AWS's advice |
+
+- `CONFIRMED` — every value was read literally from the template.
+- `INFERRED` — rests on an IAM-derived edge: permission is capability, not behaviour.
+- `ASSUMED` — holds only under workload assumptions, which the finding lists.
+- `UNASSESSED` — a value was unresolved, so the check could not be completed.
+  Never evidence of a defect, and never evidence of its absence.
+
+Which of those stops a build is your decision, not Deadletter's:
+
+```console
+deadletter . --policy default    # block only CONFIRMED violations of a REQUIREMENT
+deadletter . --policy strict     # also block RECOMMENDATION and INFERRED findings
+deadletter . --policy advisory   # report everything, block nothing
+```
+
+The default blocks considerably less than version 0.3 did. That is the point:
+EDA001's 6x visibility-timeout margin is AWS guidance, not a constraint AWS
+enforces, and blocking on it spent credibility the tool needs for the case that
+is genuinely broken.
 
 ## Install and scan
 
@@ -48,11 +83,30 @@ Example:
 ```text
 [BLOCK] EDA001 - SQS visibility timeout too short for its consumer
   at template.yaml:24:7
-  BLOCK: OrdersQueue VisibilityTimeout is 60s, while ProcessOrder Timeout is
-  30s with a 10s batching window. Required: 190s.
-  fix /Resources/OrdersQueue/Properties/VisibilityTimeout: Set
-  VisibilityTimeout to at least 190 seconds.
+  OrdersQueue VisibilityTimeout is 10s, while its consumer ProcessOrder has a
+  Timeout of 30s. Required: at least 30s - AWS requires a queue's visibility
+  timeout to be no shorter than the function that consumes it. Consequence:
+  every invocation that runs its full timeout releases the message back to the
+  queue before it finishes, so a second consumer picks up work already in
+  progress.
+  basis: confirmed requirement | impact if it bites: duplication
+  resources: OrdersQueue, ProcessOrder, ProcessOrder#FromQueue
+  fix /Resources/OrdersQueue/Properties/VisibilityTimeout: Set VisibilityTimeout
+  to at least 30 seconds to satisfy the AWS constraint, and to 190 to meet the
+  recommended retry margin.
+
+Coverage: 1 template(s), 6 resource(s), 12 rule(s).
+  Not assessed:
+    - 1 resource(s) are exported, so consumers may live in stacks this scan
+      cannot see: template.yaml:OrdersTopic
 ```
+
+Every report states the scope it was produced from. "No findings" on its own
+reads as "your system is sound", when it can mean "the part that matters was
+not visible to this scan" — so the boundaries always travel with the result:
+cross-stack imports and exports, unresolved values, files that could not be
+read, resource kinds no rule covers, and Terraform or `cdk.out` sitting beside
+the templates.
 
 The default exit policy is CI-friendly:
 
@@ -82,6 +136,9 @@ deadletter infra/ --format json
 
 # Show what the repository is choosing not to fix
 deadletter . --show-suppressed
+
+# Choose what is allowed to fail the build
+deadletter . --policy strict
 ```
 
 Formats are `text`, `json`, `sarif`, and `mermaid`. Mermaid accepts one template
@@ -137,7 +194,7 @@ permissions:
 steps:
   - uses: actions/checkout@v7.0.1
   - name: Scan event delivery
-    uses: NadavirinchiApps/Deadletter@v0.3.0
+    uses: NadavirinchiApps/Deadletter@v0.4.0
     with:
       template: .
       format: sarif
@@ -185,8 +242,21 @@ Deadletter is intentionally conservative about what a repository can prove:
 - Enabling `ReportBatchItemFailures` also requires correct handler behavior;
   Deadletter identifies the infrastructure half and says when code must change.
 - A topic or bus whose ARN is exported may be consumed by another stack, so
-  EDA012 stays silent for it. Absence of a local route stops being evidence
-  once something outside the template can reach it.
+  EDA012 stays silent for it. When there is no export, EDA012 still only warns:
+  a subscription in another stack can name the topic ARN directly, and no
+  CloudFormation export is required for it to do so. The finding asks you to
+  confirm; it does not claim nothing can reach the topic.
+- An alarm counts as monitoring only if it could actually raise someone: the
+  right metric, `ActionsEnabled` not false, and a non-empty `AlarmActions`. An
+  alarm that names a queue but cannot notify anyone is reported as worse than
+  no alarm, because somebody believes it works.
+- EDA007 cannot know a true write rate — that needs traffic, handler duration,
+  writes per event and item size, none of which a template states. It compares
+  the consumer's concurrency ceiling against the table's write ceiling and
+  publishes the assumptions that comparison rests on.
+- Templates are scanned individually and their findings combined. Deadletter
+  does not yet build one graph across several templates, so a delivery path
+  that spans stacks is reported as an analysis boundary rather than followed.
 - EDA011 sees API routes declared as SAM `Api` and `HttpApi` events. A native
   `AWS::ApiGateway::Method` integration is not yet resolved to its handler.
 - EDA010 reads inline `Definition` bodies and JSON `DefinitionString` bodies. A
@@ -194,7 +264,9 @@ Deadletter is intentionally conservative about what a repository can prove:
   substituted, is left alone rather than guessed at.
 - It does not inspect deployed drift, runtime traffic, application idempotency,
   generic IAM security, or cost.
-- Terraform, CDK source code, Azure, and GCP are outside version 0.3.
+- Terraform, CDK source code, Azure, and GCP are outside version 0.4. When
+  Deadletter finds them beside the templates it does read, it says so in the
+  coverage block rather than reporting a clean scan.
 
 ## Development
 

@@ -4,10 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deadletter"
-version = "0.3.0"
+version = "0.4.0"
 description = "Pre-deployment event-delivery correctness scanner for AWS event-driven architectures"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Nada Virinchi" }]
+keywords = ["aws", "cloudformation", "sam", "event-driven", "sqs", "lambda", "static-analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "cfn-lint>=1.0",
     "cfn-flip>=1.3",

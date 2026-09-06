@@ -6,48 +6,65 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from .findings import Finding, Severity
+from .findings import Confidence, Finding, Verdict
 
 
 def summary(findings: Iterable[Finding]) -> dict[str, int]:
     """Counts of what still fails the build, plus how much was waived."""
-    counts = {str(severity): 0 for severity in Severity}
+    counts = {str(verdict): 0 for verdict in Verdict}
     counts["suppressed"] = 0
     for finding in findings:
         if finding.suppressed:
             counts["suppressed"] += 1
         else:
-            counts[str(finding.severity)] += 1
+            counts[str(finding.verdict)] += 1
     return counts
 
 
-def report_dict(findings: list[Finding]) -> dict:
-    return {
+def report_dict(findings: list[Finding], coverage=None) -> dict:
+    report = {
         "tool": {"name": "deadletter", "version": _version()},
         "summary": summary(findings),
         "findings": [finding.to_dict() for finding in findings],
     }
+    if coverage is not None:
+        report["coverage"] = coverage.to_dict()
+    return report
 
 
-def render_json(findings: list[Finding]) -> str:
-    return json.dumps(report_dict(findings), indent=2, sort_keys=True)
+def render_json(findings: list[Finding], coverage=None) -> str:
+    return json.dumps(report_dict(findings, coverage), indent=2, sort_keys=True)
 
 
-def render_text(findings: list[Finding], show_suppressed: bool = False) -> str:
+def render_text(
+    findings: list[Finding], show_suppressed: bool = False, coverage=None
+) -> str:
     counts = summary(findings)
     shown = [f for f in findings if show_suppressed or not f.suppressed]
     if not shown:
+        # "No findings" on its own invites the reader to conclude the system is
+        # sound, when it may only mean the scan could not see the part that
+        # matters. The scope always travels with the result.
         tail = _suppressed_note(counts)
-        return "No findings." + (f" {tail}" if tail else "")
+        head = "No findings." + (f" {tail}" if tail else "")
+        return head + _coverage_block(coverage)
 
     lines: list[str] = []
     for finding in shown:
         location = _display_location(finding)
         prefix = "SUPPRESSED " if finding.suppressed else ""
-        lines.append(f"[{prefix}{finding.severity}] {finding.rule_id} - {finding.title}")
+        lines.append(f"[{prefix}{finding.verdict}] {finding.rule_id} - {finding.title}")
         if location:
             lines.append(f"  at {location}")
         lines.append(f"  {finding.message}")
+        # The reader has to be able to tell a demonstrated violation from a
+        # prediction without opening the JSON.
+        lines.append(
+            f"  basis: {finding.confidence.lower()} "
+            f"{finding.basis.lower()} | impact if it bites: {finding.impact.lower()}"
+        )
+        for assumption in finding.assumptions:
+            lines.append(f"  assumes: {assumption}")
         lines.append(f"  resources: {', '.join(finding.resources)}")
         if finding.suppressed and finding.suppression:
             lines.append(f"  suppressed by {finding.suppression}")
@@ -60,7 +77,26 @@ def render_text(findings: list[Finding], show_suppressed: bool = False) -> str:
     lines.append(line + (f", {counts['suppressed']} suppressed" if counts["suppressed"] else ""))
     if note and not show_suppressed:
         lines.append(note)
-    return "\n".join(lines)
+    return "\n".join(lines) + _coverage_block(coverage)
+
+
+def _coverage_block(coverage) -> str:
+    if coverage is None:
+        return ""
+    scanned = len(coverage.templates_scanned)
+    resources = sum(coverage.resources_by_kind.values())
+    lines = [
+        "",
+        f"Coverage: {scanned} template(s), {resources} resource(s), "
+        f"{len(coverage.rules_run)} rule(s).",
+    ]
+    limits = coverage.limits()
+    if not limits:
+        lines.append("  Nothing limited this scan.")
+    else:
+        lines.append("  Not assessed:")
+        lines.extend(f"    - {limit}" for limit in limits)
+    return "\n" + "\n".join(lines)
 
 
 def _suppressed_note(counts: dict[str, int]) -> str:
@@ -84,7 +120,7 @@ def render_sarif(findings: list[Finding]) -> str:
                 "id": rule_id,
                 "name": example.title.replace(" ", ""),
                 "shortDescription": {"text": example.title},
-                "defaultConfiguration": {"level": _sarif_level(example.severity)},
+                "defaultConfiguration": {"level": _sarif_level(example.verdict)},
             }
         )
 
@@ -93,11 +129,15 @@ def render_sarif(findings: list[Finding]) -> str:
         result = {
             "ruleId": finding.rule_id,
             "ruleIndex": rule_index[finding.rule_id],
-            "level": _sarif_level(finding.severity),
+            "level": _sarif_level(finding.verdict),
             "message": {"text": finding.message},
             "properties": {
                 "resources": finding.resources,
                 "evidence": finding.evidence,
+                "impact": str(finding.impact),
+                "confidence": str(finding.confidence),
+                "basis": str(finding.basis),
+                "assumptions": finding.assumptions,
                 "inferred": finding.inferred,
                 "remediations": [fix.to_dict() for fix in finding.remediations],
             },
@@ -163,12 +203,12 @@ def _sarif_location(finding: Finding) -> dict | None:
     return physical
 
 
-def _sarif_level(severity: Severity) -> str:
+def _sarif_level(verdict: Verdict) -> str:
     return {
-        Severity.BLOCK: "error",
-        Severity.WARN: "warning",
-        Severity.INFO: "note",
-    }[severity]
+        Verdict.BLOCK: "error",
+        Verdict.WARN: "warning",
+        Verdict.INFO: "note",
+    }[verdict]
 
 
 def _version() -> str:
