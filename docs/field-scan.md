@@ -57,10 +57,17 @@ here:
 | EDA005 demanding an `OnFailure` that is already configured | 4 | **Bug** |
 | EDA003 on an explicitly chosen `BatchSize` | 41 | Defensible, wrong `basis` |
 | EDA011 at 45–900s against a 29s integration | 31 | Defensible |
-| EDA009 fan-out, EDA008 short retention | 3 | **Correct** |
+| EDA009 stream fan-out | 2 | **Correct** |
+| EDA008 short dead-letter retention | 1 | *Reclassified — see below* |
 
-Three blocks out of 160 are unambiguously correct *and* worth stopping a
-release for.
+Two blocks out of 160 are unambiguously correct *and* worth stopping a release
+for.
+
+> **Correction.** The single EDA008 block was first counted as correct. It is
+> not: `DataProcessingDLQ` leaves `MessageRetentionPeriod` unset while its
+> source declares 14 days, so the "too short" value is AWS's 4-day default and
+> the author never wrote it. It belongs in the first row. Caught while
+> implementing the fix, which is an argument for implementing fixes.
 
 ### 1. Blocking on AWS defaults the author never wrote — 63 blocks (39%)
 
@@ -148,8 +155,39 @@ Before selling anything:
    guaranteed AWS behaviour, but whether it is *harmful* depends on handler
    idempotency, which a template cannot state.
 
-Applying 1–4 takes the block count from 160 to roughly 45, and every survivor
-would be a value somebody actually wrote.
+## Result after the fixes
+
+All four were applied in v0.4.1 and the corpus re-scanned at the same commit
+depth.
+
+| | Before | After |
+|---|---|---|
+| Total findings | 317 | 317 |
+| `BLOCK` | 160 | **5** |
+| `WARN` | 146 | 301 |
+| `INFO` | 11 | 11 |
+| Templates with at least one block | 78 | **5** |
+| Findings flagged as resting on an AWS default | — | 92 |
+
+**Nothing was hidden.** The finding count is identical: every defect Deadletter
+reported before, it still reports. What changed is that 155 of them no longer
+stop a release, and 92 now say in the report which values came from AWS rather
+than from the template — so nobody goes looking for a line that was never there.
+
+The predicted landing point was ~45 blocks. The real figure is 5, because
+fixing EDA003's `basis` and EDA011's `confidence` removed the 41 and 31
+"defensible" blocks as well as the indefensible ones. That is the intended
+behaviour of the policy split rather than an accident: both remain available
+through `--policy strict`, which blocks 262 of the 317.
+
+The five survivors, each resting on a value somebody wrote:
+
+| Rule | Where | Why it stands |
+|---|---|---|
+| EDA005 ×3 | `dynamodb-streams-appsync-subscription`, `dynamodb-streams-lambda-eventbridge-sam-{node,rust}` | A finite retry limit was set with no `OnFailure` destination, so poison records are discarded with no replay path |
+| EDA009 ×2 | `lambda-esm-ddb-filters-sam`, `lambda-esm-kinesis-filters-sam` | 7 and 8 shared-throughput readers on one shard |
+
+Each fix carries a regression test in `tests/test_trust.py`.
 
 ## Honest limits of this exercise
 

@@ -65,6 +65,13 @@ def render_text(
         )
         for assumption in finding.assumptions:
             lines.append(f"  assumes: {assumption}")
+        if finding.defaults_relied_on:
+            # Say it plainly, so nobody goes looking in the template for a value
+            # that was never written there.
+            lines.append(
+                f"  rests on AWS defaults you did not set: "
+                f"{', '.join(finding.defaults_relied_on)}"
+            )
         lines.append(f"  resources: {', '.join(finding.resources)}")
         if finding.suppressed and finding.suppression:
             lines.append(f"  suppressed by {finding.suppression}")

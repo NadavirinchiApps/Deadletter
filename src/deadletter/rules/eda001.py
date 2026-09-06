@@ -52,6 +52,18 @@ class EDA001(Rule):
                         graph, queue, function, esm, actual, timeout, required
                     )
 
+    @staticmethod
+    def _inherited(queue, function) -> list[str]:
+        """The decisive value, when AWS supplied it rather than the author.
+
+        Only the queue's visibility timeout is decisive: it is the value that is
+        too short. A consumer left at its own default Timeout does not make an
+        explicitly chosen VisibilityTimeout somebody else's fault.
+        """
+        if queue.visibility_timeout_declared:
+            return []
+        return [f"{queue.logical_id}.VisibilityTimeout"]
+
     def _unresolved(self, queue, function, esm):
         unknown = []
         if queue.visibility_timeout is None:
@@ -93,6 +105,7 @@ class EDA001(Rule):
             rule_id=self.id,
             impact=self.impact,
             basis=Basis.REQUIREMENT,
+            defaults_relied_on=self._inherited(queue, function),
             title=self.title,
             message=(
                 f"{queue.logical_id} VisibilityTimeout is {actual}s, while its consumer "
@@ -131,6 +144,7 @@ class EDA001(Rule):
             rule_id=self.id,
             impact=self.impact,
             basis=Basis.RECOMMENDATION,
+            defaults_relied_on=self._inherited(queue, function),
             title=self.title,
             message=(
                 f"{queue.logical_id} VisibilityTimeout is {actual}s, which clears its "

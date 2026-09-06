@@ -111,12 +111,16 @@ class Policy:
     confidence: frozenset[Confidence]
     basis: frozenset[Basis]
     impact: frozenset[Impact]
+    # Whether a finding resting on an AWS default may stop a build. Off by
+    # default: see `Finding.defaults_relied_on`.
+    block_on_defaults: bool = False
 
     def verdict(self, finding: "Finding") -> Verdict:
         blocks = (
             finding.confidence in self.confidence
             and finding.basis in self.basis
             and finding.impact in self.impact
+            and (self.block_on_defaults or not finding.defaults_relied_on)
         )
         if blocks:
             return Verdict.BLOCK
@@ -138,16 +142,19 @@ DEFAULT_POLICY = Policy(
 )
 
 # For teams who have decided to enforce AWS's recommendations as house policy,
-# and to treat an IAM-derived edge as good enough to act on.
+# to treat an IAM-derived edge as good enough to act on, and to hold themselves
+# to explicit values rather than inheriting AWS's defaults.
 STRICT_POLICY = Policy(
     name="strict",
     description=(
-        "Also block on recommended safeguards and on findings inferred from IAM "
-        "permissions. Assumption-dependent findings still only warn."
+        "Also block on recommended safeguards, on findings inferred from IAM "
+        "permissions, and on values left at their AWS default. "
+        "Assumption-dependent findings still only warn."
     ),
     confidence=frozenset({Confidence.CONFIRMED, Confidence.INFERRED}),
     basis=frozenset({Basis.REQUIREMENT, Basis.RECOMMENDATION}),
     impact=frozenset(BREAKING_IMPACTS | {Impact.DEGRADED}),
+    block_on_defaults=True,
 )
 
 # Report everything, block nothing. The setting for a first scan of a repository
@@ -221,6 +228,15 @@ class Finding:
     # anything. Required when confidence is ASSUMED: a risk whose assumptions
     # are not stated cannot be argued with, and so cannot be trusted.
     assumptions: list[str] = field(default_factory=list)
+    # Properties whose value came from an AWS default rather than the template.
+    #
+    # The analysis is still CONFIRMED — the deployed system really will behave
+    # this way — but the author never made this choice, and stopping their
+    # release over a value they never typed is how a scanner gets uninstalled.
+    # They open the file, find nothing matching the finding, and conclude the
+    # tool is wrong. Being right is no defence. Default policy will not block
+    # on these; `--policy strict` will.
+    defaults_relied_on: list[str] = field(default_factory=list)
     patch_hint: str | None = None
     source: str | None = None
     location: SourceLocation | None = None
@@ -290,6 +306,7 @@ class Finding:
             "resources": list(self.resources),
             "evidence": dict(self.evidence),
             "assumptions": list(self.assumptions),
+            "defaults_relied_on": list(self.defaults_relied_on),
             "patch_hint": self.patch_hint,
             "inferred": self.inferred,
             "source": self.source,

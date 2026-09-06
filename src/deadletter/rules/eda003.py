@@ -50,15 +50,29 @@ class EDA003(Rule):
                 ),
                 suggested_value=["ReportBatchItemFailures"],
             )
+            size_text = (
+                f"BatchSize is {batch_size}"
+                if esm.batch_size_declared
+                else f"BatchSize is unset, so AWS applies its default of {batch_size}"
+            )
             yield Finding(
                 rule_id=self.id,
                 impact=self.impact,
-                                title=self.title,
+                # Whole-batch redelivery on a partial failure is documented AWS
+                # behaviour, not a prediction. Whether it *harms* anything
+                # depends on whether the handler is idempotent, which no
+                # template states — so this is advice, not a violation.
+                basis=Basis.RECOMMENDATION,
+                defaults_relied_on=(
+                    [] if esm.batch_size_declared else [f"{esm.logical_id}.BatchSize"]
+                ),
+                title=self.title,
                 message=(
-                    f"{esm.logical_id} BatchSize is {batch_size}, while "
+                    f"{esm.logical_id} {size_text}, while "
                     f"FunctionResponseTypes is {esm.function_response_types or 'unset'}. "
-                    f"Required: ReportBatchItemFailures. Consequence: one failing record "
-                    f"fails the whole batch, so up to {batch_size - 1} records that already "
+                    f"Required: ReportBatchItemFailures, unless {target.logical_id} is "
+                    f"idempotent for these records. Consequence: one failing record fails "
+                    f"the whole batch, so up to {batch_size - 1} records that already "
                     f"succeeded in {target.logical_id} are delivered again — duplicate side "
                     f"effects on every retry."
                 ),

@@ -22,6 +22,7 @@ from deadletter.findings import (
     Impact,
     Verdict,
 )
+from deadletter.model import Kind
 from deadletter.rules import run
 
 from conftest import FIXTURES, graph_for
@@ -164,6 +165,100 @@ def test_a_publish_edge_from_iam_is_not_confirmed_behaviour():
     assert findings
     assert findings[0].confidence is Confidence.INFERRED
     assert findings[0].verdict is Verdict.WARN
+
+
+# --------------------------------------------------------------------------
+# Blocking on a value the author never wrote
+#
+# From a scan of 683 templates in aws-samples/serverless-patterns,
+# aws/aws-sam-cli-app-templates and aws-serverless-ecommerce-platform: 63 of
+# 160 blocks rested on an AWS default nobody had typed. The analysis was right
+# — the deployed system really behaves that way — but an engineer who opens the
+# file, finds nothing matching the finding, and concludes the tool is wrong is
+# an engineer who uninstalls it. See docs/field-scan.md.
+# --------------------------------------------------------------------------
+
+def test_an_inherited_default_does_not_stop_a_build():
+    """EDA003 fired on a DynamoDB stream consumer whose BatchSize of 100 came
+    from AWS, not the template, and blocked the release over it."""
+    graph = graph_for("EDA003", "violating.yaml")
+    esm = next(r for r in graph.template if r.kind is Kind.ESM)
+    esm.props.pop("BatchSize", None)
+    if esm.raw_props is not None:
+        esm.raw_props.pop("BatchSize", None)
+
+    findings = [f for f in run(graph) if f.rule_id == "EDA003"]
+    assert findings, "the defect is still real; it just must not block"
+    finding = findings[0]
+
+    assert finding.defaults_relied_on
+    assert finding.verdict is not Verdict.BLOCK
+    assert "unset, so AWS applies its default" in finding.message
+
+
+def test_a_value_the_author_wrote_still_blocks_under_strict():
+    """The finding does not disappear — a team can still choose to enforce it."""
+    graph = graph_for("EDA003", "violating.yaml")
+    strict = [f for f in run(graph, policy=STRICT_POLICY) if f.rule_id == "EDA003"]
+    assert strict and all(f.verdict is Verdict.BLOCK for f in strict)
+
+
+def test_the_report_says_which_values_it_inherited():
+    """So nobody goes looking in the template for a line that was never there."""
+    from deadletter.report import render_text
+
+    finding = _stub(defaults_relied_on=["Q.VisibilityTimeout"])
+    finding.verdict = Verdict.WARN
+    text = render_text([finding])
+    assert "rests on AWS defaults you did not set" in text
+    assert "Q.VisibilityTimeout" in text
+
+
+def test_only_the_decisive_side_of_a_comparison_counts_as_inherited():
+    """EDA008 compares two retentions. If the author wrote a short one on the
+    dead-letter queue, the source sitting at its AWS default does not excuse
+    it — over-crediting defaults silences findings that should block."""
+    findings = _eda("EDA008", FIXTURES / "EDA008" / "violating.yaml")
+    assert findings
+    assert findings[0].defaults_relied_on == []
+    assert findings[0].verdict is Verdict.BLOCK
+
+
+# --------------------------------------------------------------------------
+# EDA011: a timeout is a ceiling, not a duration
+# --------------------------------------------------------------------------
+
+def test_a_timeout_ceiling_is_not_evidence_the_handler_runs_that_long():
+    """50 blocks in the field scan, 19 of them a one-second overshoot. Timeout
+    is the longest the handler *may* run, not how long it does."""
+    findings = _eda("EDA011", FIXTURES / "EDA011" / "violating.yaml")
+    assert findings
+    finding = findings[0]
+
+    assert finding.confidence is Confidence.ASSUMED
+    assert finding.verdict is not Verdict.BLOCK
+    assert any("ceiling, not a duration" in a for a in finding.assumptions)
+    assert finding.evidence["seconds_beyond_integration_timeout"] > 0
+
+
+# --------------------------------------------------------------------------
+# EDA005: do not demand what is already configured
+# --------------------------------------------------------------------------
+
+def test_no_demand_for_an_on_failure_destination_that_already_exists():
+    """The unbounded retry is the defect. Asking for a destination the reader
+    can see in front of them discredits the rest of the finding."""
+    graph = graph_for("EDA005", "violating.yaml")
+    esm = next(r for r in graph.template if r.kind is Kind.ESM)
+    esm.props["DestinationConfig"] = {"OnFailure": {"Destination": "arn:aws:sqs:::already-there"}}
+
+    findings = [f for f in run(graph) if f.rule_id == "EDA005"]
+    assert findings, "unbounded retries are still a defect"
+    finding = findings[0]
+
+    assert "plus an OnFailure destination" not in finding.message
+    assert "already set" in finding.message
+    assert all("OnFailure" not in fix.path for fix in finding.remediations)
 
 
 # --------------------------------------------------------------------------

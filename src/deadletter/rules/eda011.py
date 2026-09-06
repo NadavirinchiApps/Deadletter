@@ -73,16 +73,33 @@ class EDA011(Rule):
                 ),
                 suggested_value=limit,
             )
+            overshoot = timeout - limit
             yield Finding(
                 rule_id=self.id,
                 impact=self.impact,
-                                title=self.title,
+                # A Lambda Timeout is a ceiling, not a duration. Exceeding the
+                # integration limit means the handler is *permitted* to outlive
+                # it, not that it does — that depends on how long the work
+                # actually takes, which no template states.
+                basis=Basis.RECOMMENDATION,
+                confidence=Confidence.ASSUMED,
+                assumptions=[
+                    f"That {function.logical_id} can actually run longer than {limit}s. "
+                    f"Timeout is a ceiling, not a duration: a {timeout}s Timeout only "
+                    f"matters here if the work sometimes takes more than {limit}s.",
+                ],
+                defaults_relied_on=(
+                    [] if function.timeout_declared else [f"{function.logical_id}.Timeout"]
+                ),
+                title=self.title,
                 message=(
-                    f"{function.logical_id} Timeout is {timeout}s, while "
-                    f"{carrier.logical_id} invokes it through a {flavour} API whose integration "
-                    f"gives up at {limit}s. Required: at most {limit}s. Consequence: past {limit}s "
-                    f"the caller receives 504 while the invocation runs on to completion, so a "
-                    f"client retry repeats work that already succeeded and was never reported."
+                    f"{function.logical_id} Timeout is {timeout}s — {overshoot}s beyond the "
+                    f"{limit}s at which {carrier.logical_id}'s {flavour} API integration gives "
+                    f"up. Required: a Timeout at most {limit}s, or confirmation that the "
+                    f"handler always finishes inside it. Consequence: any request that runs "
+                    f"past {limit}s returns 504 to the caller while the invocation continues "
+                    f"to completion, so a client retry repeats work that already succeeded and "
+                    f"was never reported."
                 ),
                 resources=[function.logical_id, carrier.logical_id, edge.source],
                 evidence={
@@ -92,6 +109,7 @@ class EDA011(Rule):
                     f"{carrier.logical_id}.Path": carrier.prop("Path"),
                     f"{carrier.logical_id}.Method": carrier.prop("Method"),
                     "integration_timeout": limit,
+                    "seconds_beyond_integration_timeout": overshoot,
                 },
                 patch_hint=f"Set {fix.path} to {limit} (Timeout: {limit}).",
                 remediations=[fix],

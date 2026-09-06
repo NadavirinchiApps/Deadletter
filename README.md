@@ -194,7 +194,7 @@ permissions:
 steps:
   - uses: actions/checkout@v7.0.1
   - name: Scan event delivery
-    uses: NadavirinchiApps/Deadletter@v0.4.0
+    uses: NadavirinchiApps/Deadletter@v0.4.1
     with:
       template: .
       format: sarif

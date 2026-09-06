@@ -103,6 +103,14 @@ class EDA008(Rule):
                 rule_id=self.id,
                 impact=self.impact,
                 basis=basis,
+                # Only the dead-letter queue's own retention is decisive. If the
+                # author wrote a short value there, the source sitting at its
+                # AWS default does not excuse it.
+                defaults_relied_on=(
+                    []
+                    if dlq.message_retention_declared
+                    else [f"{dlq.logical_id}.MessageRetentionPeriod"]
+                ),
                 title=self.title,
                 message=(
                     f"{dlq.logical_id} MessageRetentionPeriod is {dlq_retention}s, "

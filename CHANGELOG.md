@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.1
+
+Scanning 683 templates from `aws-samples/serverless-patterns`,
+`aws/aws-sam-cli-app-templates` and `aws-serverless-ecommerce-platform` — code
+written with no knowledge of this tool — produced 160 blocks, of which **two**
+were unambiguously correct and worth stopping a release for. This release is
+the correction. Full adjudication in [`docs/field-scan.md`](docs/field-scan.md).
+
+Block count on that corpus goes from **160 to 5**, with the finding count
+unchanged at 317. Nothing was hidden; 155 findings simply stopped stopping
+releases.
+
+### A finding may not block on a value the author never wrote
+
+The largest single problem, 63 of 160 blocks. EDA003 applied AWS's default
+`BatchSize` of 100 and blocked; EDA005 applied the infinite stream-retry
+defaults and blocked. The analysis is right — the deployed system really does
+behave that way — but an engineer who opens the file, finds nothing matching the
+finding, and concludes the tool is wrong is an engineer who uninstalls it.
+
+`Finding.defaults_relied_on` names the properties whose values came from AWS.
+The default policy will not block on them; `--policy strict` will. The text
+report says so in as many words, so nobody hunts for a line that was never
+there. Only the *decisive* side of a comparison counts — if the author wrote a
+short retention on a dead-letter queue, the source queue sitting at its default
+does not excuse it.
+
+### Rules corrected
+
+- **EDA011** claimed `CONFIRMED`/`REQUIREMENT` on a modelling error: a Lambda
+  `Timeout` is a ceiling, not a duration. `Timeout: 100` means the handler *may*
+  run 100s, not that it does, so whether the 504 ever happens depends on runtime
+  behaviour no template states. Now `ASSUMED`, states that assumption, and
+  reports how many seconds beyond the integration timeout the ceiling sits. This
+  removed 50 blocks, 19 of which were a *one-second* overshoot and 16 of which
+  were AWS's own `sam init` scaffolding.
+- **EDA005** demanded an `OnFailure` destination that four findings' own
+  evidence showed was already configured. The rule computed `recoverable`, used
+  it to decide whether to skip, then ignored it when composing the message and
+  the remediation list. The unbounded-retry half was always correct; the demand
+  attached to it was not.
+- **EDA003** is now `RECOMMENDATION`. Whole-batch redelivery on a partial
+  failure is documented AWS behaviour, but whether it is *harmful* depends on
+  whether the handler is idempotent, which no template states. The message now
+  says so.
+
+### What the field scan confirmed was working
+
+Reported for balance: EDA008 warned rather than blocked on 18 dead-letter queues
+whose retention equals their source, EDA012 warned on all 14 unrouted topics as
+`INFERRED`, and 80% of the 683 templates came back completely clean. All three
+are behaviour introduced in 0.4.0.
+
 ## 0.4.0
 
 Trust. An external review found that several findings claimed more than the

@@ -91,19 +91,45 @@ class EDA005(Rule):
                 )
                 fixes = [destination_fix]
             else:
+                # Do not demand a destination that is already configured. The
+                # unbounded retry is the defect here; asking for something the
+                # reader can see in front of them discredits the rest.
+                requirement = (
+                    "a finite retry count or record age"
+                    if recoverable
+                    else "a finite retry count or record age plus an OnFailure destination"
+                )
+                already = (
+                    " Its OnFailure destination is already set, so records are preserved "
+                    "once the limit exists."
+                    if recoverable
+                    else ""
+                )
                 message = (
                     f"{esm.logical_id} reads from {source.logical_id} with "
                     f"MaximumRetryAttempts {retries if retries is not None else 'unset (infinite)'} "
                     f"and MaximumRecordAgeInSeconds "
-                    f"{record_age if record_age is not None else 'unset (infinite)'}. Required: a "
-                    f"finite retry count or record age plus an OnFailure destination. Consequence: "
-                    f"one unprocessable record is retried until source retention expires and later "
-                    f"records on that shard wait behind it."
+                    f"{record_age if record_age is not None else 'unset (infinite)'}. "
+                    f"Required: {requirement}. Consequence: one unprocessable record is "
+                    f"retried until source retention expires and later records on that shard "
+                    f"wait behind it.{already}"
                 )
-                fixes = [retry_fix, destination_fix]
+                fixes = [retry_fix] if recoverable else [retry_fix, destination_fix]
+
+            # AWS defaults both limits to infinite. That is genuinely how the
+            # deployed system behaves, but the author never chose it.
+            inherited = [
+                f"{esm.logical_id}.{name}"
+                for name, declared in (
+                    ("MaximumRetryAttempts", retry_declared),
+                    ("MaximumRecordAgeInSeconds", age_declared),
+                )
+                if not declared
+            ]
             yield Finding(
                 rule_id=self.id,
                 impact=impact,
+                defaults_relied_on=[] if bounded else inherited,
                 title=self.title,
                 message=message,
                 resources=[esm.logical_id, source.logical_id, target.logical_id],
