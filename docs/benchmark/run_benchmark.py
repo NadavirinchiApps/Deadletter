@@ -31,6 +31,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "tests" / "fixtures"
@@ -88,17 +89,38 @@ SERVERLESS_RELATED = {
 }
 
 
+class ToolFailed(RuntimeError):
+    """A tool ran and did not return something this script can read.
+
+    Returning an empty list here instead would record the competitor as having
+    missed the defect, which is the one error this benchmark exists not to make.
+    An unreadable run is not a miss; it is an unknown, and it stops the run.
+    """
+
+
+def _parse(tool: str, path: Path, out: subprocess.CompletedProcess[str]) -> Any:
+    try:
+        return json.loads(out.stdout or "")
+    except json.JSONDecodeError as exc:
+        raise ToolFailed(
+            f"{tool} produced no readable JSON for {path.relative_to(REPO)}\n"
+            f"  exit status: {out.returncode}\n"
+            f"  stdout: {(out.stdout or '').strip()[:400] or '(empty)'}\n"
+            f"  stderr: {(out.stderr or '').strip()[-1200:] or '(empty)'}"
+        ) from exc
+
+
 def run_deadletter(path: Path) -> list[dict]:
     out = subprocess.run(
         [sys.executable, "-m", "deadletter", str(path), "--format", "json", "--fail-on", "none"],
         capture_output=True, text=True, cwd=REPO, encoding="utf-8",
     )
     if out.returncode not in (0, 1):
-        return []
-    try:
-        return json.loads(out.stdout)["findings"]
-    except (json.JSONDecodeError, KeyError):
-        return []
+        raise ToolFailed(f"deadletter exited {out.returncode} on {path}\n{out.stderr}")
+    data = _parse("deadletter", path, out)
+    if "findings" not in data:
+        raise ToolFailed(f"deadletter report for {path} has no findings key")
+    return data["findings"]
 
 
 def run_checkov(path: Path) -> list[dict]:
@@ -107,10 +129,7 @@ def run_checkov(path: Path) -> list[dict]:
          "--framework", "cloudformation", "--output", "json", "--compact", "--quiet"],
         capture_output=True, text=True, cwd=REPO, encoding="utf-8",
     )
-    try:
-        data = json.loads(out.stdout)
-    except json.JSONDecodeError:
-        return []
+    data = _parse("checkov", path, out)
     if isinstance(data, list):
         results = []
         for block in data:
@@ -130,25 +149,22 @@ def run_serverless_rules(path: Path) -> list[dict]:
          "-a", "cfn_lint_serverless.rules", "-f", "json", "-t", str(path)],
         capture_output=True, text=True, cwd=REPO, encoding="utf-8",
     )
-    try:
-        data = json.loads(out.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
+    data = _parse("cfn-lint-serverless", path, out)
     # Only the pack's own rules. cfn-lint's built-in E/W findings are template
     # validity, not delivery defects, and counting them would be dishonest.
     return [m for m in data if str(m.get("Rule", {}).get("Id", "")).startswith("ES")]
 
 
 def run_cdk_nag(path: Path) -> list[dict]:
+    # nag.js prints JSON on every path it can take, including the two it takes
+    # when CfnInclude or the harness throws, so empty output means node itself
+    # failed and there is nothing to report about cdk-nag.
     script = HERE / "nag.js"
     out = subprocess.run(
         ["node", str(script), str(path)],
         capture_output=True, text=True, cwd=HERE, encoding="utf-8",
     )
-    try:
-        return json.loads(out.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
+    return _parse("cdk-nag", path, out)
 
 
 def missing_tools() -> list[str]:
@@ -222,7 +238,18 @@ def main(argv: list[str] | None = None) -> int:
         print("cannot run the benchmark without: " + ", ".join(missing), file=sys.stderr)
         return 2
 
-    payload = json.dumps(collect(), indent=2)
+    try:
+        rows = collect()
+    except ToolFailed as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        print(
+            "\nThe benchmark stops rather than record a tool that could not run as a "
+            "tool that found nothing. Fix the tool's environment and run it again.",
+            file=sys.stderr,
+        )
+        return 2
+
+    payload = json.dumps(rows, indent=2)
     target = HERE / "results.json"
 
     if check:
