@@ -23,6 +23,16 @@ from typing import Any, Iterable
 _SUB_TOKEN = re.compile(r"\$\{([A-Za-z0-9]+)(?:\.[A-Za-z0-9.]+)?\}")
 _ARN_TAIL = re.compile(r"arn:[^:]*:[^:]*:[^:]*:[^:]*:(?:[^:/]+[:/])?([A-Za-z0-9_.:-]+)$")
 
+# A state-machine definition assembled by Fn::Join or Fn::Sub is JSON with
+# resource ARNs punched out of it. Substituting a marker for each one keeps the
+# document parseable, so the workflow can be read, while still saying which
+# resource stood there. See `model.StateMachine.definition`.
+_PLACEHOLDER = re.compile(r"__dl_ref:([A-Za-z0-9]+)__")
+
+# The same token pattern, for callers that rewrite a !Sub body rather than
+# resolve it.
+SUB_TOKEN = _SUB_TOKEN
+
 
 @dataclass(frozen=True)
 class Reference:
@@ -120,6 +130,23 @@ def _combine(references: Iterable[Reference]) -> Reference:
             literals.append(reference.literal)
     literal = literals[0] if len(literals) == 1 and not ids else None
     return Reference(logical_ids=frozenset(ids), literal=literal, unresolved=unresolved)
+
+
+def placeholder(logical_id: str) -> str:
+    return f"__dl_ref:{logical_id}__"
+
+
+def resolve_definition(node: Any) -> Reference:
+    """Resolve a value read out of a rebuilt state-machine definition.
+
+    Same as `resolve`, except a string holding one or more placeholders points
+    at the resources they stand for rather than being treated as a literal ARN.
+    """
+    if isinstance(node, str):
+        ids = set(_PLACEHOLDER.findall(node))
+        if ids:
+            return Reference(logical_ids=frozenset(ids), literal=node)
+    return resolve(node)
 
 
 def referenced_ids(node: Any) -> set[str]:

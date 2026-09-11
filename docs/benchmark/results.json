@@ -12,6 +12,11 @@
       "CKV_AWS_27"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 3,
     "cdknag_ids": [
       "AwsSolutions-SQS3",
@@ -31,7 +36,13 @@
       "CKV_AWS_117",
       "CKV_AWS_27"
     ],
-    "checkov_hit": false,
+    "checkov_hit": true,
+    "serverless_rules_total": 2,
+    "serverless_rules_ids": [
+      "ES4000",
+      "ES6000"
+    ],
+    "serverless_rules_hit": true,
     "cdknag_total": 2,
     "cdknag_ids": [
       "AwsSolutions-SQS3",
@@ -43,7 +54,7 @@
     "rule": "EDA003",
     "defect": "batch size > 1 without ReportBatchItemFailures replays succeeded records",
     "deadletter": true,
-    "deadletter_verdict": "BLOCK",
+    "deadletter_verdict": "WARN",
     "checkov_total": 5,
     "checkov_ids": [
       "CKV_AWS_115",
@@ -52,6 +63,11 @@
       "CKV_AWS_27"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 3,
     "cdknag_ids": [
       "AwsSolutions-SQS3",
@@ -72,6 +88,11 @@
       "CKV_AWS_27"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 2,
     "cdknag_ids": [
       "AwsSolutions-SQS3",
@@ -83,7 +104,7 @@
     "rule": "EDA005",
     "defect": "unbounded stream retries let one poison record block a shard",
     "deadletter": true,
-    "deadletter_verdict": "BLOCK",
+    "deadletter_verdict": "WARN",
     "checkov_total": 4,
     "checkov_ids": [
       "CKV_AWS_115",
@@ -92,6 +113,12 @@
       "CKV_AWS_43"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 2,
+    "serverless_rules_ids": [
+      "ES1001",
+      "ES1005"
+    ],
+    "serverless_rules_hit": true,
     "cdknag_total": 1,
     "cdknag_ids": [
       "__include_error__"
@@ -111,6 +138,11 @@
       "CKV_AWS_27"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 3,
     "cdknag_ids": [
       "AwsSolutions-SQS3",
@@ -134,6 +166,11 @@
       "CKV_AWS_28"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 5,
     "cdknag_ids": [
       "AwsSolutions-DDB3",
@@ -156,6 +193,11 @@
       "CKV_AWS_27"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 3,
     "cdknag_ids": [
       "AwsSolutions-SQS3",
@@ -177,6 +219,11 @@
       "CKV_AWS_43"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 1,
+    "serverless_rules_ids": [
+      "ES6000"
+    ],
+    "serverless_rules_hit": false,
     "cdknag_total": 3,
     "cdknag_ids": [
       "AwsSolutions-KDS1",
@@ -197,6 +244,9 @@
       "CKV_AWS_117"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 0,
+    "serverless_rules_ids": [],
+    "serverless_rules_hit": false,
     "cdknag_total": 0,
     "cdknag_ids": [],
     "cdknag_hit": false
@@ -205,7 +255,7 @@
     "rule": "EDA011",
     "defect": "handler timeout exceeds the API Gateway integration timeout",
     "deadletter": true,
-    "deadletter_verdict": "BLOCK",
+    "deadletter_verdict": "WARN",
     "checkov_total": 3,
     "checkov_ids": [
       "CKV_AWS_115",
@@ -213,6 +263,9 @@
       "CKV_AWS_117"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 0,
+    "serverless_rules_ids": [],
+    "serverless_rules_hit": false,
     "cdknag_total": 0,
     "cdknag_ids": [],
     "cdknag_hit": false
@@ -231,6 +284,9 @@
       "CKV_AWS_26"
     ],
     "checkov_hit": false,
+    "serverless_rules_total": 0,
+    "serverless_rules_ids": [],
+    "serverless_rules_hit": false,
     "cdknag_total": 1,
     "cdknag_ids": [
       "AwsSolutions-SNS3"

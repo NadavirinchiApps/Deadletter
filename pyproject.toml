@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deadletter"
-version = "0.4.1"
+version = "0.6.0"
 description = "Pre-deployment event-delivery correctness scanner for AWS event-driven architectures"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,11 +24,24 @@ dependencies = [
     "networkx>=3.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/NadavirinchiApps/Deadletter"
+Source = "https://github.com/NadavirinchiApps/Deadletter"
+Changelog = "https://github.com/NadavirinchiApps/Deadletter/blob/prod/CHANGELOG.md"
+Issues = "https://github.com/NadavirinchiApps/Deadletter/issues"
+
 [project.optional-dependencies]
 dev = ["build>=1.2", "pytest>=8.0"]
+# The rule pack runs inside cfn-lint; cfn-lint-serverless, which the benchmark
+# compares against, requires 1.44 or newer.
+cfnlint = ["cfn-lint>=1.44"]
+# 2.0 renamed FastMCP to MCPServer. `mcp_server.py` prefers the new name and
+# falls back, but the pin is on the version this was tested against.
+mcp = ["mcp>=2.0"]
 
 [project.scripts]
 deadletter = "deadletter.cli:main"
+deadletter-mcp = "deadletter.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

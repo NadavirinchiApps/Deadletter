@@ -10,11 +10,22 @@ and a finding that can't quote the config it objects to isn't credible.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from .intrinsics import Reference, as_bool, as_int, ensure_list, first, resolve
+from .intrinsics import (
+    SUB_TOKEN,
+    Reference,
+    as_bool,
+    as_int,
+    ensure_list,
+    first,
+    name_from_arn,
+    placeholder,
+    resolve,
+)
 
 
 class Kind(StrEnum):
@@ -32,6 +43,7 @@ class Kind(StrEnum):
     DATABASE = "database"
     ALARM = "alarm"
     ROLE = "role"
+    POLICY = "policy"
     API = "api"
     INVOKE_CONFIG = "invoke_config"
     UNKNOWN = "unknown"
@@ -65,6 +77,9 @@ class Resource:
     synthetic: bool = False  # derived from a SAM Events block, not written literally
     origin: str | None = None  # logical ID of the resource that implied it
     source_path: tuple[str | int, ...] = field(default_factory=tuple)
+    # The file this resource was read from. Equal to the template source today;
+    # it stops being so the moment several stacks share one graph.
+    source_file: str | None = None
     condition: str | None = None
     condition_value: bool | None = True
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -89,9 +104,21 @@ class Resource:
         return (*self.source_path, *parts)
 
     @property
+    def construct_path(self) -> str | None:
+        """CDK's own name for this resource, e.g. `OrdersStack/Handler/Resource`.
+
+        Synthesized logical IDs carry a hash nobody wrote and nobody can grep
+        for. The construct path is what the author typed.
+        """
+        value = self.metadata.get("aws:cdk:path")
+        return value if isinstance(value, str) else None
+
+    @property
     def name_hint(self) -> str | None:
         """Physical name, when the template hardcodes one — used to match literal ARNs."""
-        value = self.prop("QueueName", "TopicName", "FunctionName", "Name", "TableName", "StreamName")
+        value = self.prop(
+            "QueueName", "TopicName", "FunctionName", "Name", "TableName", "StreamName", "RoleName"
+        )
         return value if isinstance(value, str) else None
 
 
@@ -138,6 +165,20 @@ class Function(Resource):
     def max_retry_attempts(self) -> int | None:
         cfg = self.prop("EventInvokeConfig")
         return as_int(cfg.get("MaximumRetryAttempts")) if isinstance(cfg, dict) else None
+
+    @property
+    def recursive_loop_terminates(self) -> bool:
+        """Whether Lambda's own recursive-loop detection is left switched on.
+
+        Lambda drops an event after 16 hops around a Lambda/SQS/SNS/S3 loop and
+        raises a Health event, in every commercial region. `RecursiveLoop: Allow`
+        turns that guardrail off; `Terminate` is the default for new functions,
+        so silence means the guardrail applies.
+        """
+        value = self.prop("RecursiveLoop")
+        if isinstance(value, str):
+            return value.strip().lower() != "allow"
+        return True
 
 
 @dataclass
@@ -310,19 +351,21 @@ class StateMachine(Resource):
     def definition(self) -> dict[str, Any]:
         """SAM writes `Definition` inline; native templates write a JSON string.
 
-        A `DefinitionString` wrapped in Fn::Sub arrives here as a dict and is
-        left alone — a rule must not pretend to read a definition it could not
-        substitute. `DefinitionUri` points outside the template entirely.
+        CDK writes neither: it emits a `DefinitionString` built by `Fn::Join`
+        from literal JSON fragments with `Ref`/`Fn::GetAtt` spliced in where the
+        ARNs go, or an `Fn::Sub` body with `${Fn.Arn}` tokens. Joining the
+        literals and substituting a placeholder for each reference gives back a
+        parseable document that still says which resource stood at each point,
+        which is the difference between reading a CDK workflow and being blind
+        to every one of them. `DefinitionUri` points outside the template
+        entirely and is still left alone.
         """
         definition = self.prop("Definition", "DefinitionString")
         if isinstance(definition, dict):
-            return definition
+            rebuilt = _rebuild_definition(definition)
+            return rebuilt if rebuilt is not None else definition
         if isinstance(definition, str):
-            try:
-                parsed = json.loads(definition)
-            except ValueError:
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
+            return _parse_definition(definition)
         return {}
 
     @property
@@ -344,6 +387,62 @@ class StateMachine(Resource):
             if isinstance(iterator, dict) and isinstance(iterator.get("States"), dict):
                 found.extend(self.iter_states(iterator["States"]))
         return found
+
+
+def _parse_definition(text: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _rebuild_definition(node: dict[str, Any]) -> dict[str, Any] | None:
+    """A definition assembled by Fn::Join or Fn::Sub, with references punched out.
+
+    Returns None when the value is not one of those — a SAM inline `Definition`
+    is a real document and must be handed back untouched.
+    """
+    if "Fn::Join" in node:
+        body = node["Fn::Join"]
+        if not isinstance(body, list) or len(body) != 2:
+            return None
+        delimiter = body[0] if isinstance(body[0], str) else ""
+        pieces = []
+        for piece in ensure_list(body[1]):
+            if isinstance(piece, str):
+                pieces.append(piece)
+            else:
+                pieces.append(_placeholder_for(piece))
+        return _parse_definition(delimiter.join(pieces)) or None
+
+    if "Fn::Sub" in node:
+        body = node["Fn::Sub"]
+        template = body[0] if isinstance(body, list) and body else body
+        if not isinstance(template, str):
+            return None
+        variables = (
+            body[1] if isinstance(body, list) and len(body) > 1 and isinstance(body[1], dict) else {}
+        )
+
+        def substitute(match: "re.Match[str]") -> str:
+            token = match.group(1)
+            if token.startswith("AWS"):
+                return match.group(0)  # a pseudo-parameter is not a resource
+            if token in variables:
+                return _placeholder_for(variables[token])
+            return placeholder(token)
+
+        return _parse_definition(SUB_TOKEN.sub(substitute, template)) or None
+
+    return None
+
+
+def _placeholder_for(node: Any) -> str:
+    """The marker that stands in for one spliced-in reference."""
+    reference = resolve(node)
+    target = reference.logical_id or next(iter(sorted(reference.logical_ids)), None)
+    return placeholder(target) if target else "__dl_unresolved__"
 
 
 @dataclass
@@ -469,3 +568,34 @@ class Role(Resource):
                         s for s in ensure_list(document.get("Statement")) if isinstance(s, dict)
                     )
         return statements
+
+
+@dataclass
+class Policy(Resource):
+    """An IAM policy written as a resource of its own, not inline on the role.
+
+    `AWS::IAM::Policy` and `AWS::IAM::ManagedPolicy` are how CDK expresses every
+    grant, and how plenty of hand-written CloudFormation does too. A scanner
+    that only reads inline `Policies` sees a role with no permissions, builds no
+    IAM-derived edges, and reports a clean template because it never looked.
+    """
+
+    roles: list[Reference] = field(default_factory=list)
+
+    @property
+    def policy_statements(self) -> list[dict[str, Any]]:
+        document = self.prop("PolicyDocument")
+        if not isinstance(document, dict):
+            return []
+        return [s for s in ensure_list(document.get("Statement")) if isinstance(s, dict)]
+
+    def attaches_to(self, role: Resource) -> bool:
+        """Whether `Roles` names this role, by logical ID or by literal name/ARN."""
+        name = role.name_hint
+        for reference in self.roles:
+            if role.logical_id in reference.logical_ids:
+                return True
+            literal = reference.literal
+            if literal and name and (literal == name or name_from_arn(literal) == name):
+                return True
+        return False

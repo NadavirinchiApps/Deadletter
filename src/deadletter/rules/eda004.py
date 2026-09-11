@@ -5,11 +5,16 @@ from __future__ import annotations
 import networkx as nx
 
 from ..findings import Basis, Confidence, Finding, Impact
-from ..model import Kind, Rule as EventRule
+from ..model import Function, Kind, Rule as EventRule
 from .base import Rule, register, remediation
 
 CYCLE_EDGES = {"poll", "rule_target", "subscribe", "invoke", "publish"}
 FILTER_KEYS = ("source", "detail-type", "detail")
+
+# Lambda's recursive-loop detection drops an event after this many hops and
+# raises a Health event. It watches Lambda, SQS, SNS and S3 only.
+RECURSION_HOP_LIMIT = 16
+GUARDED_KINDS = (Kind.FUNCTION, Kind.TOPIC, Kind.QUEUE)
 
 
 @register
@@ -99,6 +104,15 @@ class EDA004(Rule):
                 if filters
                 else "at least one route has no source, detail-type, or detail filter"
             )
+            guarded, opted_out = self._runtime_guardrail(graph, hub, cycle)
+            consequence = (
+                f"each matching event costs up to {RECURSION_HOP_LIMIT} invocations before "
+                f"Lambda's recursive-loop detection drops it and raises a Health event, and "
+                f"the dropped event is gone — the loop is expensive, not unbounded."
+                if guarded
+                else "each matching event can re-trigger the cycle, multiplying invocations "
+                "and cost until throttling stops it."
+            )
 
             fixes = [
                 remediation(
@@ -125,15 +139,14 @@ class EDA004(Rule):
             )
             yield Finding(
                 rule_id=self.id,
-                impact=self.impact,
+                impact=Impact.DEGRADED if guarded else self.impact,
                 confidence=confidence,
                 assumptions=assumptions,
                 title=self.title,
                 message=(
                     f"events delivered from {hub} can return to it via {path}, while "
                     f"{guard}. Required: verify a filter excludes the consumer's own emissions, "
-                    f"or remove the return edge. Consequence: each matching event can re-trigger "
-                    f"the cycle, multiplying invocations and cost until throttling stops it."
+                    f"or remove the return edge. Consequence: {consequence}"
                 ),
                 resources=list(dict.fromkeys(cycle)),
                 evidence={
@@ -142,12 +155,44 @@ class EDA004(Rule):
                     "pattern_filters": sorted(filters) or None,
                     "carriers": carrier_names,
                     "analysis": "strongly-connected-component",
+                    **(
+                        {
+                            "aws_runtime_guardrail": "lambda-recursive-loop-detection",
+                            "hops_before_drop": RECURSION_HOP_LIMIT,
+                        }
+                        if guarded
+                        else {}
+                    ),
+                    **({"recursive_loop_allowed_by": opted_out} if opted_out else {}),
                 },
                 patch_hint=(
                     f"Verify and update {fixes[0].path}." if fixes else "Remove the inferred publish return edge."
                 ),
                 remediations=fixes,
             )
+
+    @staticmethod
+    def _runtime_guardrail(graph, hub: str, cycle: list[str]) -> tuple[bool, list[str]]:
+        """Whether Lambda already stops this loop on its own, and who opted out.
+
+        Lambda's recursive-loop detection drops an event after 16 hops around a
+        Lambda/SQS/SNS/S3 loop, in every commercial region. It does not watch
+        EventBridge buses, DynamoDB or Kinesis streams, or Step Functions, so a
+        cycle through any of those is still unbounded and keeps its STALL
+        impact. Claiming an unbounded loop where AWS caps it at 16 invocations
+        is the kind of overstatement that costs the next finding its reader.
+        """
+        hub_resource = graph.node(hub)
+        if hub_resource is None or hub_resource.kind is not Kind.TOPIC:
+            return False, []
+        opted_out: list[str] = []
+        for logical_id in cycle:
+            resource = graph.node(logical_id)
+            if resource is None or resource.kind not in GUARDED_KINDS:
+                return False, []
+            if isinstance(resource, Function) and not resource.recursive_loop_terminates:
+                opted_out.append(resource.logical_id)
+        return not opted_out, opted_out
 
     @staticmethod
     def _rules_in_component(graph, component: set[str]) -> list[EventRule]:

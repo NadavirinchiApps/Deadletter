@@ -25,7 +25,11 @@ class EDA001(Rule):
 
         AWS's *constraint* is that a queue's visibility timeout must be at least
         the consuming function's timeout; below that, a message is guaranteed to
-        become visible again while its first invocation is still running.
+        become visible again while its first invocation is still running. Lambda
+        enforces it at the mapping API, so a template written this way fails to
+        deploy rather than duplicating work — the state the finding describes is
+        reached by lowering the queue's timeout under a mapping that already
+        exists, which nothing rejects.
 
         AWS's *recommendation* is six times the function timeout plus the
         batching window, which buys room for retries. Falling short of the
@@ -110,9 +114,13 @@ class EDA001(Rule):
             message=(
                 f"{queue.logical_id} VisibilityTimeout is {actual}s, while its consumer "
                 f"{function.logical_id} has a Timeout of {timeout}s. Required: at least "
-                f"{timeout}s — AWS requires a queue's visibility timeout to be no shorter "
-                f"than the function that consumes it. Consequence: every invocation that "
-                f"runs its full timeout releases the message back to the queue before it "
+                f"{timeout}s — Lambda rejects CreateEventSourceMapping and "
+                f"UpdateEventSourceMapping below that with InvalidParameterValueException, "
+                f"so this template does not deploy as written. Consequence: a fresh deploy "
+                f"fails at the mapping rather than duplicating anything, but an existing "
+                f"mapping survives its queue's VisibilityTimeout being lowered afterwards — "
+                f"which the SQS API accepts — and from then on every invocation that runs "
+                f"its full timeout releases the message back to the queue before it "
                 f"finishes, so a second consumer picks up work already in progress."
             ),
             resources=[queue.logical_id, function.logical_id, esm.logical_id],
@@ -121,6 +129,7 @@ class EDA001(Rule):
                 f"{function.logical_id}.Timeout": timeout,
                 f"{esm.logical_id}.MaximumBatchingWindowInSeconds": esm.batching_window,
                 "aws_minimum": timeout,
+                "aws_rejects_at_mapping_creation": True,
                 "recommended_minimum": required,
                 "visibility_timeout_declared": queue.visibility_timeout_declared,
             },

@@ -1,0 +1,58 @@
+{
+  "Resources": {
+    "ChargeHandlerServiceRole8C1D2E3F": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [{ "Action": "sts:AssumeRole", "Effect": "Allow", "Principal": { "Service": "lambda.amazonaws.com" } }],
+          "Version": "2012-10-17"
+        }
+      },
+      "Metadata": { "aws:cdk:path": "PaymentsStack/ChargeHandler/ServiceRole/Resource" }
+    },
+    "ChargeHandler4A5B6C7D": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": { "S3Bucket": "cdk-hnb659fds-assets-123456789012-us-east-1", "S3Key": "charge.zip" },
+        "Handler": "index.charge",
+        "Role": { "Fn::GetAtt": ["ChargeHandlerServiceRole8C1D2E3F", "Arn"] },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30
+      },
+      "Metadata": { "aws:cdk:path": "PaymentsStack/ChargeHandler/Resource" }
+    },
+    "PaymentsStateMachineRoleD1E2F3A4": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [{ "Action": "sts:AssumeRole", "Effect": "Allow", "Principal": { "Service": "states.amazonaws.com" } }],
+          "Version": "2012-10-17"
+        }
+      },
+      "Metadata": { "aws:cdk:path": "PaymentsStack/PaymentsStateMachine/Role/Resource" }
+    },
+    "PaymentsStateMachine9B8A7C6D": {
+      "Type": "AWS::StepFunctions::StateMachine",
+      "Properties": {
+        "RoleArn": { "Fn::GetAtt": ["PaymentsStateMachineRoleD1E2F3A4", "Arn"] },
+        "DefinitionString": {
+          "Fn::Join": [
+            "",
+            [
+              "{\"StartAt\":\"Charge\",\"States\":{\"Charge\":{\"Type\":\"Task\",\"Resource\":\"",
+              { "Fn::GetAtt": ["ChargeHandler4A5B6C7D", "Arn"] },
+              "\",\"End\":true}}}"
+            ]
+          ]
+        }
+      },
+      "DependsOn": ["PaymentsStateMachineRoleD1E2F3A4"],
+      "Metadata": { "aws:cdk:path": "PaymentsStack/PaymentsStateMachine/Resource" }
+    },
+    "CDKMetadata": {
+      "Type": "AWS::CDK::Metadata",
+      "Properties": { "Analytics": "v2:deflate64:H4sIAAAA" },
+      "Metadata": { "aws:cdk:path": "PaymentsStack/CDKMetadata/Default" }
+    }
+  }
+}

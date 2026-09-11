@@ -14,6 +14,14 @@ class EDA002(Rule):
     basis = Basis.RECOMMENDATION
     title = "Incomplete dead-letter coverage for a failing delivery"
     condition = "Any consumer failure that exhausts retries."
+    # Three free tools already report the "a dead-letter path is missing" half.
+    # What is left here is the split between transport failure and post-
+    # acceptance execution failure, which is a refinement, not a new check.
+    overlaps = (
+        "cfn-lint-serverless ES6000/ES7000/ES4000/ES1007",
+        "checkov CKV_AWS_116",
+        "cdk-nag AwsSolutions-SQS3",
+    )
 
     def check(self, graph):
         yield from self._queues(graph)

@@ -1,0 +1,12 @@
+{
+  "name": "deadletter-cdk-sample",
+  "private": true,
+  "description": "A small CDK app used to check Deadletter against real cdk synth output. See README.md",
+  "devDependencies": {
+    "aws-cdk": "^2.1029.4"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.268.0",
+    "constructs": "^10.8.1"
+  }
+}

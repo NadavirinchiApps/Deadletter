@@ -147,3 +147,43 @@ def test_every_covered_kind_is_reachable_by_a_rule():
 
     assert COVERED_KINDS <= set(Kind)
     assert Kind.QUEUE in COVERED_KINDS and Kind.FUNCTION in COVERED_KINDS
+
+
+def test_unknown_resources_are_listed_by_cloudformation_type():
+    """"unknown (3)" is not a scope statement. The reader needs to know which
+    three types went unread before they can judge whether it matters."""
+    coverage = collect(
+        [build(load(FIXTURES / "cdk" / "Stack.template.json"))], rules_run=["EDA004"]
+    )
+
+    assert coverage.uncovered_kinds == {
+        "AWS::Lambda::Permission": 1,
+        "AWS::CDK::Metadata": 1,
+    }
+    assert "AWS::CDK::Metadata (1)" in " ".join(coverage.limits())
+
+
+def test_a_function_whose_role_lives_elsewhere_is_named(tmp_path):
+    """Every rule resting on an IAM-derived edge is silent for that function.
+    Silence must not read as "checked and found nothing"."""
+    path = tmp_path / "stack.yaml"
+    path.write_text(
+        """
+Resources:
+  Worker:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: app.handler
+      Role: {"Fn::ImportValue": platform-worker-role-arn}
+""",
+        encoding="utf-8",
+    )
+
+    coverage = _coverage_for(path)
+
+    assert not coverage.complete
+    assert any("Worker" in entry for entry in coverage.iam_unresolved_roles)
+    assert any(
+        "publish and write edges from IAM were not inferred" in limit
+        for limit in coverage.limits()
+    )

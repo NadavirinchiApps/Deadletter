@@ -122,3 +122,88 @@ def test_looks_like_template_needs_more_than_the_word_resources(tmp_path: Path):
     prose.write_text("title: Resources we still need to buy\n", encoding="utf-8")
 
     assert not looks_like_template(prose)
+
+
+# --------------------------------------------------------------------------
+# Synthesized CDK output
+#
+# `cdk.out` stays out of the generic walk: it is full of asset copies and
+# nested templates that would be scanned twice. The manifest says exactly which
+# files are stacks, so a CDK team gets scanned without listing templates by hand.
+# --------------------------------------------------------------------------
+
+def _assembly(tmp_path: Path, template: str = TEMPLATE) -> Path:
+    import json
+
+    out = tmp_path / "cdk.out"
+    out.mkdir()
+    (out / "OrdersStack.template.json").write_text(
+        '{"Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q"}}}}',
+        encoding="utf-8",
+    )
+    (out / "OrdersStack.assets.json").write_text('{"files": {}}', encoding="utf-8")
+    (out / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "36.0.0",
+                "artifacts": {
+                    "OrdersStack.assets": {"type": "cdk:asset-manifest"},
+                    "OrdersStack": {
+                        "type": "aws:cloudformation:stack",
+                        "properties": {"templateFile": "OrdersStack.template.json"},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return out
+
+
+def test_a_cloud_assembly_manifest_names_the_stacks_to_scan(tmp_path: Path):
+    from deadletter.discover import cdk_stacks
+
+    out = _assembly(tmp_path)
+
+    assert cdk_stacks(tmp_path) == [out / "OrdersStack.template.json"]
+
+
+def test_only_the_manifests_stacks_are_scanned_not_the_whole_directory(tmp_path: Path):
+    """Asset staging copies live in cdk.out too, and scanning them would report
+    the same finding twice against a file nobody edits."""
+    out = _assembly(tmp_path)
+    staged = out / "asset.abc123"
+    staged.mkdir()
+    (staged / "template.yaml").write_text(TEMPLATE, encoding="utf-8")
+
+    targets, problems = resolve([tmp_path])
+
+    assert not problems
+    assert [t.path for t in targets] == [out / "OrdersStack.template.json"]
+    assert targets[0].origin == "cdk"
+
+
+def test_a_cdk_out_with_no_manifest_is_still_skipped(tmp_path: Path):
+    out = tmp_path / "cdk.out"
+    out.mkdir()
+    (out / "OrdersStack.template.json").write_text(TEMPLATE, encoding="utf-8")
+
+    _, problems = resolve([tmp_path])
+
+    assert problems and "no CloudFormation or SAM templates" in problems[0]
+
+
+def test_allow_empty_turns_an_empty_directory_into_a_clean_exit(tmp_path: Path, capsys):
+    """pre-commit runs the hook on whatever repository it is installed in, and
+    a checkout with no templates is not a wrong path."""
+    (tmp_path / "readme.md").write_text("nothing here", encoding="utf-8")
+
+    assert main([str(tmp_path)]) == 2
+    assert main([str(tmp_path), "--allow-empty"]) == 0
+    assert capsys.readouterr().err.count("ERROR") == 1
+
+
+def test_allow_empty_still_fails_on_a_path_that_does_not_exist(tmp_path: Path, capsys):
+    """"Nothing to scan" and "you typed the wrong path" are different answers."""
+    assert main([str(tmp_path / "missing"), "--allow-empty"]) == 2
+    assert "no such file or directory" in capsys.readouterr().err

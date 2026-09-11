@@ -46,6 +46,10 @@ COVERED_KINDS = frozenset(
         m.Kind.RULE,
         m.Kind.INVOKE_CONFIG,
         m.Kind.ALARM,
+        # Not checked directly, but read: their statements are what the
+        # publish and write edges several rules reason about are derived from.
+        m.Kind.ROLE,
+        m.Kind.POLICY,
     }
 )
 
@@ -77,6 +81,10 @@ class Coverage:
     cross_stack_imports: list[str] = field(default_factory=list)
     unresolved_values: list[str] = field(default_factory=list)
     out_of_scope_infrastructure: dict[str, int] = field(default_factory=dict)
+    # Functions whose execution role is not in this scan. Every rule that rests
+    # on an IAM-derived edge is silent for them, and silence must not read as
+    # "checked and found nothing".
+    iam_unresolved_roles: list[str] = field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -88,6 +96,7 @@ class Coverage:
             or self.unresolved_values
             or self.uncovered_kinds
             or self.out_of_scope_infrastructure
+            or self.iam_unresolved_roles
         )
 
     def limits(self) -> list[str]:
@@ -117,6 +126,12 @@ class Coverage:
                 f"{', '.join(self.unresolved_values[:5])}"
                 + (" ..." if len(self.unresolved_values) > 5 else "")
             )
+        if self.iam_unresolved_roles:
+            notes.append(
+                f"publish and write edges from IAM were not inferred for: "
+                f"{', '.join(self.iam_unresolved_roles[:5])}"
+                + (" ..." if len(self.iam_unresolved_roles) > 5 else "")
+            )
         if self.uncovered_kinds:
             listed = ", ".join(f"{kind} ({count})" for kind, count in sorted(self.uncovered_kinds.items()))
             notes.append(f"resource kinds no rule reasons about were skipped: {listed}")
@@ -145,6 +160,7 @@ class Coverage:
             "cross_stack_imports": list(self.cross_stack_imports),
             "unresolved_values": list(self.unresolved_values),
             "out_of_scope_infrastructure": dict(self.out_of_scope_infrastructure),
+            "iam_unresolved_roles": list(self.iam_unresolved_roles),
             "limits": self.limits(),
         }
 
@@ -168,9 +184,19 @@ def collect(
         for resource in template:
             kinds[str(resource.kind)] += 1
             if resource.kind not in COVERED_KINDS:
-                coverage.uncovered_kinds[str(resource.kind)] = (
-                    coverage.uncovered_kinds.get(str(resource.kind), 0) + 1
+                # "unknown (3)" tells a reader nothing they can act on. The CFN
+                # type tells them exactly which three resources went unread, and
+                # whether that matters in their stack.
+                label = (
+                    resource.cfn_type or str(resource.kind)
+                    if resource.kind is m.Kind.UNKNOWN
+                    else str(resource.kind)
                 )
+                coverage.uncovered_kinds[label] = coverage.uncovered_kinds.get(label, 0) + 1
+        for function_id, role in sorted(graph.unresolved_roles.items()):
+            coverage.iam_unresolved_roles.append(
+                _qualify(template.source, f"{function_id} (Role: {role})")
+            )
         for export in sorted(template.exports):
             coverage.cross_stack_exports.append(_qualify(template.source, export))
         for label in _open_references(template):
@@ -179,8 +205,23 @@ def collect(
             coverage.unresolved_values.append(_qualify(template.source, label))
 
     coverage.resources_by_kind = dict(sorted(kinds.items()))
-    coverage.out_of_scope_infrastructure = _out_of_scope(roots)
+    coverage.out_of_scope_infrastructure = _out_of_scope(
+        roots, {str(Path(source)) for source in coverage.templates_scanned}
+    )
     return coverage
+
+
+def _assembly_was_read(assembly: Path, scanned: set[str]) -> bool:
+    """Whether at least one stack this cloud assembly declares was scanned.
+
+    A `cdk.out` beside the templates used to mean "the event flow probably
+    continues somewhere this scan cannot follow". Once the manifest is read,
+    that is no longer true for the stacks it names — but it stays true for an
+    assembly nobody pointed the scanner at, so the check is per-assembly.
+    """
+    from .discover import cdk_stacks
+
+    return any(str(path) in scanned for path in cdk_stacks(assembly.parent))
 
 
 def _qualify(source: str | None, label: str) -> str:
@@ -244,7 +285,7 @@ def _has_import(value: Any, depth: int = 0) -> bool:
     return False
 
 
-def _out_of_scope(roots: Iterable[Path]) -> dict[str, int]:
+def _out_of_scope(roots: Iterable[Path], scanned: set[str] = frozenset()) -> dict[str, int]:
     """Infrastructure next to the templates that this scanner does not read."""
     counts: Counter[str] = Counter()
     for root in roots:
@@ -255,8 +296,11 @@ def _out_of_scope(roots: Iterable[Path]) -> dict[str, int]:
             parts = set(path.parts)
             if path.is_dir():
                 for name, what in OUT_OF_SCOPE_DIRS.items():
-                    if path.name == name:
-                        counts[what] += 1
+                    if path.name != name:
+                        continue
+                    if name == "cdk.out" and _assembly_was_read(path, scanned):
+                        continue  # its manifest named the stacks, and we read them
+                    counts[what] += 1
                 continue
             if parts & (SKIP_DIRS - set(OUT_OF_SCOPE_DIRS)):
                 continue

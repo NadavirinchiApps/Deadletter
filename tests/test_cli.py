@@ -91,3 +91,58 @@ def test_cli_can_write_a_report_file(capsys, tmp_path: Path):
     assert exit_code == 0
     assert capsys.readouterr().out == ""
     assert json.loads(output.read_text(encoding="utf-8"))["summary"]["BLOCK"] >= 1
+
+
+def test_the_deprecated_severity_key_is_gone(capsys):
+    """0.4.0 promised removal in the next minor. `verdict` is the only name for
+    the policy decision; `severity` used to mean impact, confidence and policy
+    at once, which is the confusion the three axes exist to end."""
+    main([str(FIXTURES / "EDA001" / "violating-requirement.yaml"), "--format", "json"])
+    report = json.loads(capsys.readouterr().out)
+
+    finding = report["findings"][0]
+    assert "severity" not in finding
+    assert finding["verdict"] == "BLOCK"
+
+
+def test_a_finding_carries_the_tools_that_also_report_it(capsys):
+    """EDA002's dead-letter half is covered by three free tools. A reader who
+    hears it from us first has no reason to doubt the rest of the report."""
+    main(
+        [
+            str(FIXTURES / "EDA002" / "violating.yaml"),
+            "--format", "json",
+            "--rule", "EDA002",
+            "--fail-on", "none",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert any("cfn-lint-serverless" in o for o in report["findings"][0]["overlaps"])
+
+    main([str(FIXTURES / "EDA002" / "violating.yaml"), "--rule", "EDA002", "--fail-on", "none"])
+    assert "also reported by:" in capsys.readouterr().out
+
+
+def test_a_cdk_finding_names_the_construct_the_author_wrote(capsys):
+    """`Handler2F3E4D5C` is not something anyone can search for. The construct
+    path is what they typed, and it has to reach text, JSON and SARIF."""
+    path = FIXTURES / "cdk" / "StateMachine.template.json"
+
+    main([str(path), "--rule", "EDA010", "--fail-on", "none"])
+    assert "construct: PaymentsStack/PaymentsStateMachine/Resource" in capsys.readouterr().out
+
+    main([str(path), "--rule", "EDA010", "--fail-on", "none", "--format", "json"])
+    finding = json.loads(capsys.readouterr().out)["findings"][0]
+    assert finding["location"]["address"] == "PaymentsStack/PaymentsStateMachine/Resource"
+
+    main([str(path), "--rule", "EDA010", "--fail-on", "none", "--format", "sarif"])
+    result = json.loads(capsys.readouterr().out)["runs"][0]["results"][0]
+    assert result["properties"]["address"] == "PaymentsStack/PaymentsStateMachine/Resource"
+
+
+def test_sarif_rules_point_at_their_documentation(capsys):
+    main([str(FIXTURES / "EDA010" / "violating.yaml"), "--fail-on", "none", "--format", "sarif"])
+    driver = json.loads(capsys.readouterr().out)["runs"][0]["tool"]["driver"]
+
+    assert driver["rules"][0]["helpUri"].endswith("docs/rules/EDA010.md")

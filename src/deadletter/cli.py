@@ -9,7 +9,7 @@ from typing import Sequence
 
 from . import __version__, build, load
 from .coverage import collect as collect_coverage
-from .discover import resolve
+from .discover import NO_TEMPLATES, resolve
 from .findings import POLICIES, Finding, Verdict
 from .report import render_json, render_sarif, render_text
 from .rules import all_rules, run
@@ -67,6 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include findings waived by template metadata in the text report",
     )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help=(
+            "exit 0 when a directory holds no templates instead of treating it "
+            "as a wrong path (for pre-commit and monorepos)"
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -92,6 +100,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     _use_utf8_stdout()
 
     targets, problems = resolve(args.templates)
+    if args.allow_empty:
+        problems = [problem for problem in problems if not problem.endswith(NO_TEMPLATES)]
+        if not targets and not problems:
+            return 0
     for problem in problems:
         print(f"ERROR: {problem}", file=sys.stderr)
     if problems:

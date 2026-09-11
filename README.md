@@ -1,37 +1,53 @@
 # deadletter
 
-Deadletter catches event-delivery failures in AWS infrastructure before they
-reach production.
+Deadletter checks the wiring *between* serverless resources — the queue and the
+function that drains it, the rule and the target it delivers to, the stream and
+the consumer that reads it — and states how well it knows each thing it reports.
+Whether any of it stops your build is your decision, not the tool's.
 
 Checkov can tell you that a bucket is public. Infracost can tell you what a
-change costs. Deadletter follows delivery paths across queues, functions,
-topics, streams, and event buses to find configurations that cause duplicate
-processing, silent event loss, poison-record stalls, or recursive invocation
-loops.
+change costs. `cfn-lint-serverless`, which AWS ships free, checks that a
+dead-letter path exists. Deadletter checks whether that path goes anywhere,
+whether the timeouts on both ends agree, and whether the consumer can publish
+back into the bus that invoked it.
 
 It scans CloudFormation and AWS SAM in the repository. It never needs AWS
 credentials or access to a cloud account.
 
 ## What it detects
 
-| Rule | Impact | Defect |
-|---|---|---|
-| EDA001 | duplication | SQS visibility timeout is unsafe for the connected Lambda timeout |
-| EDA002 | loss | A polled or asynchronous delivery has missing or partial dead-letter coverage |
-| EDA003 | duplication | A failed item replays an entire batch because partial failure reporting is absent |
-| EDA004 | stall | A function can publish back into the bus or topic that invoked it |
-| EDA005 | stall / loss | A stream poison record can block a shard or be discarded without recovery |
-| EDA006 | loss | A dead-letter queue has no consumer and no working alarm, so what lands there expires unseen |
-| EDA007 | stall | A consumer's concurrency ceiling outruns a provisioned table's write capacity |
-| EDA008 | loss | A dead-letter queue expires messages sooner than the queue that feeds it |
-| EDA009 | stall | More shared-throughput readers on a stream shard than its read budget serves |
-| EDA010 | stall | A workflow task treats a transient error as final, with no retry or catch |
-| EDA011 | duplication | A synchronous handler may outlive the API integration timeout waiting on it |
-| EDA012 | loss | Events are published to a topic or bus that routes them nowhere |
+| Rule | Impact | Defect | Also reported by |
+|---|---|---|---|
+| [EDA001](docs/rules/EDA001.md) | duplication | SQS visibility timeout is unsafe for the connected Lambda timeout | — [^1] |
+| [EDA002](docs/rules/EDA002.md) | loss | A polled or asynchronous delivery has missing or partial dead-letter coverage | `cfn-lint-serverless` ES6000/ES7000/ES4000/ES1007, Checkov CKV_AWS_116, cdk-nag AwsSolutions-SQS3 |
+| [EDA003](docs/rules/EDA003.md) | duplication | A failed item replays an entire batch because partial failure reporting is absent | — |
+| [EDA004](docs/rules/EDA004.md) | stall | A function can publish back into the bus or topic that invoked it | — [^2] |
+| [EDA005](docs/rules/EDA005.md) | stall / loss | A stream poison record can block a shard or be discarded without recovery | `cfn-lint-serverless` ES1001 (destination half only) |
+| [EDA006](docs/rules/EDA006.md) | loss | A dead-letter queue has no consumer and no working alarm, so what lands there expires unseen | — |
+| [EDA007](docs/rules/EDA007.md) | stall | A consumer's concurrency ceiling outruns a provisioned table's write capacity | Checkov CKV_AWS_115 (concurrency alone, nothing downstream) |
+| [EDA008](docs/rules/EDA008.md) | loss | A dead-letter queue expires messages sooner than the queue that feeds it | — |
+| [EDA009](docs/rules/EDA009.md) | stall | More shared-throughput readers on a stream shard than its read budget serves | — |
+| [EDA010](docs/rules/EDA010.md) | stall | A workflow task treats a transient error as final, with no retry or catch | — |
+| [EDA011](docs/rules/EDA011.md) | duplication | A synchronous handler may outlive the API integration timeout waiting on it | — |
+| [EDA012](docs/rules/EDA012.md) | loss | Events are published to a topic or bus that routes them nowhere | — |
 
-For how these compare against Checkov and cdk-nag on the same templates, see
-[docs/benchmark.md](docs/benchmark.md). Two of the twelve overlap with checks
-those tools already run; ten do not.
+[^1]: The requirement half is also enforced by AWS itself: Lambda rejects
+`CreateEventSourceMapping` and `UpdateEventSourceMapping` when the queue's
+visibility timeout is below the function timeout, so a template written that way
+fails to deploy. The state the finding describes is reached by lowering the
+queue's timeout under a mapping that already exists, which nothing rejects.
+
+[^2]: Lambda's own recursive-loop detection stops Lambda/SQS/SNS/S3 loops after
+16 hops in every commercial region, so Deadletter reports those as `DEGRADED` —
+expensive, not unbounded — unless a function sets `RecursiveLoop: Allow`. Loops
+through an EventBridge bus, a DynamoDB or Kinesis stream, or a state machine are
+not covered by that guardrail and keep their `STALL` impact.
+
+Every finding that overlaps another tool says so in its own output, on an
+`also reported by:` line. For the measured comparison against
+`cfn-lint-serverless`, Checkov and cdk-nag on the same templates, see
+[docs/benchmark.md](docs/benchmark.md): ten of the twelve are reported by no
+other tool, and the two that are, are the two that look best in a demo.
 
 ## Findings say how well they are known
 
@@ -73,10 +89,35 @@ is genuinely broken.
 Deadletter requires Python 3.12 or newer.
 
 ```console
-pip install .
+pip install deadletter     # published from the v0.5.0 tag onwards
+pip install .              # or from a clone, at any commit
 deadletter template.yaml
-deadletter .              # search the repository for templates
+deadletter .               # search the repository for templates
 ```
+
+It also runs inside the tools you already have. Same graph, same twelve rules,
+same messages:
+
+```console
+# pre-commit: add to .pre-commit-config.yaml
+#   - repo: https://github.com/NadavirinchiApps/Deadletter
+#     rev: v0.6.0
+#     hooks: [{id: deadletter}]
+
+# cfn-lint, as a rule pack (pip install "deadletter[cfnlint]")
+# -a takes one or more module names, so the template goes before it, under -t.
+cfn-lint -t template.yaml -a deadletter.integrations.cfnlint
+
+# MCP, so an AI reviewer can call the rules instead of guessing at them
+pip install "deadletter[mcp]"
+claude mcp add deadletter -- deadletter-mcp
+```
+
+The cfn-lint pack reports each finding once: as `E91xx` when the default policy
+would block it, `W91xx` otherwise. The MCP server exposes `scan_paths`,
+`explain_rule` and `event_graph`, and its reports carry the coverage block, so a
+model can tell "nothing is wrong here" apart from "this scan could not see the
+part that matters".
 
 Example:
 
@@ -84,11 +125,14 @@ Example:
 [BLOCK] EDA001 - SQS visibility timeout too short for its consumer
   at template.yaml:24:7
   OrdersQueue VisibilityTimeout is 10s, while its consumer ProcessOrder has a
-  Timeout of 30s. Required: at least 30s - AWS requires a queue's visibility
-  timeout to be no shorter than the function that consumes it. Consequence:
-  every invocation that runs its full timeout releases the message back to the
-  queue before it finishes, so a second consumer picks up work already in
-  progress.
+  Timeout of 30s. Required: at least 30s - Lambda rejects
+  CreateEventSourceMapping and UpdateEventSourceMapping below that with
+  InvalidParameterValueException, so this template does not deploy as written.
+  Consequence: a fresh deploy fails at the mapping rather than duplicating
+  anything, but an existing mapping survives its queue's VisibilityTimeout being
+  lowered afterwards - which the SQS API accepts - and from then on every
+  invocation that runs its full timeout releases the message back to the queue
+  before it finishes, so a second consumer picks up work already in progress.
   basis: confirmed requirement | impact if it bites: duplication
   resources: OrdersQueue, ProcessOrder, ProcessOrder#FromQueue
   fix /Resources/OrdersQueue/Properties/VisibilityTimeout: Set VisibilityTimeout
@@ -105,8 +149,8 @@ Every report states the scope it was produced from. "No findings" on its own
 reads as "your system is sound", when it can mean "the part that matters was
 not visible to this scan" — so the boundaries always travel with the result:
 cross-stack imports and exports, unresolved values, files that could not be
-read, resource kinds no rule covers, and Terraform or `cdk.out` sitting beside
-the templates.
+read, resource types no rule covers, functions whose execution role is not in
+the scan, and Terraform or an unscanned `cdk.out` sitting beside the templates.
 
 The default exit policy is CI-friendly:
 
@@ -149,7 +193,37 @@ skips generated trees such as `.aws-sam`, `cdk.out`, `node_modules`, and
 `build`. A path you name is always scanned, and failing to read it is an error;
 a path found by walking is skipped silently if it turns out not to be a
 template. A directory containing no templates is an error rather than a clean
-scan, because that is nearly always a wrong path.
+scan, because that is nearly always a wrong path — pass `--allow-empty` where
+that is expected, as pre-commit and monorepo roots are.
+
+## CDK
+
+A synthesized stack is CloudFormation, so it is read like any other — including
+the `AWS::IAM::Policy` resources CDK emits for every grant, which is where the
+publish and write edges several rules reason about come from.
+
+Point Deadletter at a directory holding a `cdk.out` and it reads
+`cdk.out/manifest.json` to find the stacks that assembly declares, rather than
+walking the directory and picking up asset staging copies of the same template:
+
+```console
+cdk synth
+deadletter .
+```
+
+Findings from a synthesized template name the construct that produced them:
+
+```text
+[WARN] EDA007 - Consumer concurrency exceeds the table's write capacity
+  at cdk.out/OrdersStack.template.json:121:4
+  construct: OrdersStack/Handler/Resource
+```
+
+`Handler886CB40B` is not something the author of the CDK app can search for.
+`OrdersStack/Handler/Resource` is. The construct path travels in the JSON and
+SARIF reports too. A worked example, synthesized from a real app rather than
+written by hand to look like one, is in
+[docs/samples/cdk](docs/samples/cdk/README.md).
 
 ## Suppressing a finding
 
@@ -194,9 +268,10 @@ permissions:
 steps:
   - uses: actions/checkout@v7.0.1
   - name: Scan event delivery
-    uses: NadavirinchiApps/Deadletter@v0.4.1
+    uses: NadavirinchiApps/Deadletter@v0.6.0
     with:
       template: .
+      policy: default        # default | strict | advisory
       format: sarif
       output: deadletter.sarif
       fail-on: BLOCK
@@ -219,7 +294,9 @@ invoking the CLI. It does not evaluate template paths as shell source.
    subscriptions, rules, and API routes.
 4. Build a directed event-flow graph. IAM statements can add inferred publish
    or write edges only when the action and resource occur in the same Allow
-   statement.
+   statement. Statements are read from inline `Policies` and from
+   `AWS::IAM::Policy` / `AWS::IAM::ManagedPolicy` resources attached to the
+   function's role, which is how CDK writes every grant.
 5. Run pure graph rules and emit evidence, source lines, structural JSON-pointer
    paths, and remediation guidance.
 6. Apply any suppressions the template declares, marking rather than deleting
@@ -262,11 +339,20 @@ Deadletter is intentionally conservative about what a repository can prove:
 - EDA010 reads inline `Definition` bodies and JSON `DefinitionString` bodies. A
   definition behind `DefinitionUri`, or one whose `Fn::Sub` cannot be
   substituted, is left alone rather than guessed at.
+- A function whose execution role is not in the scan gets no IAM-derived edges
+  at all. The coverage block names it rather than letting the silence read as
+  "checked and found nothing".
+- EDA004 reports a Lambda/SQS/SNS loop as `DEGRADED`, because Lambda's own
+  recursive-loop detection drops the event after 16 hops. It does not claim an
+  unbounded loop where AWS caps the cost.
 - It does not inspect deployed drift, runtime traffic, application idempotency,
   generic IAM security, or cost.
-- Terraform, CDK source code, Azure, and GCP are outside version 0.4. When
-  Deadletter finds them beside the templates it does read, it says so in the
-  coverage block rather than reporting a clean scan.
+- Synthesized CDK templates are read through `cdk.out/manifest.json`, and
+  findings carry construct paths. CDK *source* is not parsed, and a nested stack
+  the manifest does not declare as its own artifact is not scanned.
+- Terraform, Azure, and GCP are outside version 0.6. When Deadletter finds them
+  beside the templates it does read, it says so in the coverage block rather
+  than reporting a clean scan.
 
 ## Development
 

@@ -12,8 +12,15 @@ inputs:
     description: Include findings waived by template metadata in a text report.
     required: false
     default: "false"
+  policy:
+    description: >-
+      Which findings are allowed to BLOCK: 'default' blocks only confirmed
+      violations of AWS requirements, 'strict' also blocks recommended
+      safeguards and IAM-inferred findings, 'advisory' blocks nothing.
+    required: false
+    default: default
   fail-on:
-    description: Lowest severity that fails the step (BLOCK, WARN, INFO, or none).
+    description: Lowest verdict that fails the step (BLOCK, WARN, INFO, or none).
     required: false
     default: BLOCK
   format:
@@ -24,6 +31,10 @@ inputs:
     description: Optional report file path. Leave empty to print to the workflow log.
     required: false
     default: ""
+  allow-empty:
+    description: Exit 0 when the path holds no templates instead of failing the step.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -39,16 +50,26 @@ runs:
       shell: bash
       env:
         DEADLETTER_TEMPLATE: ${{ inputs.template }}
+        DEADLETTER_POLICY: ${{ inputs.policy }}
         DEADLETTER_FAIL_ON: ${{ inputs.fail-on }}
         DEADLETTER_FORMAT: ${{ inputs.format }}
         DEADLETTER_OUTPUT: ${{ inputs.output }}
         DEADLETTER_SHOW_SUPPRESSED: ${{ inputs.show-suppressed }}
+        DEADLETTER_ALLOW_EMPTY: ${{ inputs.allow-empty }}
       run: |
-        args=("$DEADLETTER_TEMPLATE" --fail-on "$DEADLETTER_FAIL_ON" --format "$DEADLETTER_FORMAT")
+        args=(
+          "$DEADLETTER_TEMPLATE"
+          --policy "$DEADLETTER_POLICY"
+          --fail-on "$DEADLETTER_FAIL_ON"
+          --format "$DEADLETTER_FORMAT"
+        )
         if [[ -n "$DEADLETTER_OUTPUT" ]]; then
           args+=(--output "$DEADLETTER_OUTPUT")
         fi
         if [[ "$DEADLETTER_SHOW_SUPPRESSED" == "true" ]]; then
           args+=(--show-suppressed)
+        fi
+        if [[ "$DEADLETTER_ALLOW_EMPTY" == "true" ]]; then
+          args+=(--allow-empty)
         fi
         deadletter "${args[@]}"

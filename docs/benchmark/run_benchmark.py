@@ -1,4 +1,4 @@
-"""Benchmark Deadletter against Checkov and cdk-nag on the 12 violating fixtures.
+"""Benchmark Deadletter against the free tools on the 12 violating fixtures.
 
 The question this answers is the only one that matters commercially: on a
 template with a known event-delivery defect, does an existing free tool already
@@ -12,7 +12,17 @@ hand whether any of them describe the *same defect* — not merely the same
 resource. A Checkov result saying "SQS queue is not encrypted" on the EDA001
 fixture is not a hit for "visibility timeout is shorter than its consumer".
 
-Judgement lives in RELATED_CHECKS below, so it can be argued with.
+Judgement lives in RELATED_CHECKS and SERVERLESS_RELATED below, so it can be
+argued with.
+
+Usage
+-----
+    python run_benchmark.py            # regenerate results.json
+    python run_benchmark.py --check    # fail if results.json is out of date
+
+Every tool must be installed. A run with a tool missing would record zeros and
+quietly turn a competitor's hit into a miss, which is the one error this
+benchmark exists not to make.
 """
 
 from __future__ import annotations
@@ -22,9 +32,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(r"F:\deadletter\Deadletter")
+REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "tests" / "fixtures"
 HERE = Path(__file__).parent
+
+# cfn-lint has no `python -m` entry point; this is its console script inlined.
+CFN_LINT_MAIN = "import sys; from cfnlint.runner import main; sys.exit(main())"
 
 # What each fixture is built to demonstrate, in one line.
 DEFECTS = {
@@ -46,9 +59,32 @@ DEFECTS = {
 # deliberately generous: anything arguably about the same failure counts as a
 # hit, so the comparison cannot flatter Deadletter by being strict.
 RELATED_CHECKS = {
-    "EDA002": {"CKV_AWS_101"},   # Lambda DLQ configured
-    "EDA006": {"CKV_AWS_101"},
+    # "Ensure that AWS Lambda function is configured for a Dead Letter Queue".
+    # CKV_AWS_101 is the older id for the same check, kept so a rename does not
+    # silently turn a hit into a miss.
+    "EDA002": {"CKV_AWS_116", "CKV_AWS_101"},
+    # Deliberately empty. CKV_AWS_116 fires on this fixture too, but it says a
+    # Lambda has no dead-letter queue; EDA006 says the dead-letter queue that
+    # exists has no consumer and no alarm that could raise anybody. Same
+    # resource, different defect, and counting it would make the table worthless.
+    "EDA006": set(),
+    # Also deliberately empty. CKV_AWS_115 (function-level concurrency limit)
+    # fires on every Lambda without a reserved concurrency and never compares it
+    # against anything downstream. benchmark.md records it as a partial by hand.
+    "EDA007": set(),
     "EDA012": set(),
+}
+
+# awslabs/serverless-rules, shipped by AWS as a cfn-lint rule pack. This is the
+# nearest competitor there is, and it is free.
+SERVERLESS_RELATED = {
+    # ES6000 SQS redrive, ES7000 SNS redrive, ES4000 EventBridge rule DLQ,
+    # ES1007 Lambda async failure destination. Between them they cover all of
+    # what EDA002 reports.
+    "EDA002": {"ES6000", "ES7000", "ES4000", "ES1007"},
+    # ES1001 asks for an EventSourceMapping failure destination — the
+    # destination half of EDA005. The unbounded-retry half has no equivalent.
+    "EDA005": {"ES1001"},
 }
 
 
@@ -83,10 +119,28 @@ def run_checkov(path: Path) -> list[dict]:
     return data.get("results", {}).get("failed_checks", [])
 
 
+def run_serverless_rules(path: Path) -> list[dict]:
+    """cfn-lint with the `cfn-lint-serverless` rule pack appended.
+
+    `-a` takes a list, so the template has to arrive through `-t` or the path
+    is swallowed as another rule module.
+    """
+    out = subprocess.run(
+        [sys.executable, "-c", CFN_LINT_MAIN,
+         "-a", "cfn_lint_serverless.rules", "-f", "json", "-t", str(path)],
+        capture_output=True, text=True, cwd=REPO, encoding="utf-8",
+    )
+    try:
+        data = json.loads(out.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    # Only the pack's own rules. cfn-lint's built-in E/W findings are template
+    # validity, not delivery defects, and counting them would be dishonest.
+    return [m for m in data if str(m.get("Rule", {}).get("Id", "")).startswith("ES")]
+
+
 def run_cdk_nag(path: Path) -> list[dict]:
     script = HERE / "nag.js"
-    if not script.exists():
-        return []
     out = subprocess.run(
         ["node", str(script), str(path)],
         capture_output=True, text=True, cwd=HERE, encoding="utf-8",
@@ -97,7 +151,26 @@ def run_cdk_nag(path: Path) -> list[dict]:
         return []
 
 
-def main() -> int:
+def missing_tools() -> list[str]:
+    """Everything the run needs and does not have."""
+    missing: list[str] = []
+    for module, name in (
+        ("checkov", "checkov (pip install checkov)"),
+        ("cfn_lint_serverless", "cfn-lint-serverless (pip install cfn-lint-serverless)"),
+    ):
+        probe = subprocess.run(
+            [sys.executable, "-c", f"import {module}"], capture_output=True, text=True
+        )
+        if probe.returncode != 0:
+            missing.append(name)
+    if not (HERE / "node_modules").is_dir():
+        missing.append("cdk-nag (cd docs/benchmark && npm install)")
+    elif subprocess.run(["node", "--version"], capture_output=True).returncode != 0:
+        missing.append("node")
+    return missing
+
+
+def collect() -> list[dict]:
     rows = []
     for rule_id, defect in DEFECTS.items():
         fixture = FIXTURES / rule_id / "violating.yaml"
@@ -106,11 +179,14 @@ def main() -> int:
 
         dl = [f for f in run_deadletter(fixture) if f["rule_id"] == rule_id]
         ck = run_checkov(fixture)
+        srv = run_serverless_rules(fixture)
         nag = run_cdk_nag(fixture)
 
         ck_ids = sorted({c.get("check_id", "") for c in ck})
+        srv_ids = sorted({m.get("Rule", {}).get("Id", "") for m in srv})
         nag_ids = sorted({n.get("ruleId", "") for n in nag})
         related = RELATED_CHECKS.get(rule_id, set())
+        srv_related = SERVERLESS_RELATED.get(rule_id, set())
 
         rows.append({
             "rule": rule_id,
@@ -120,19 +196,50 @@ def main() -> int:
             "checkov_total": len(ck),
             "checkov_ids": ck_ids,
             "checkov_hit": bool(related & set(ck_ids)),
+            "serverless_rules_total": len(srv),
+            "serverless_rules_ids": srv_ids,
+            "serverless_rules_hit": bool(srv_related & set(srv_ids)),
             "cdknag_total": len(nag),
             "cdknag_ids": nag_ids,
             "cdknag_hit": False,  # judged by hand below
         })
         print(
             f"{rule_id}  deadletter={'Y' if dl else 'n'}  "
-            f"checkov={len(ck):>2} findings {ck_ids[:4]}  "
-            f"cdk-nag={len(nag):>2} findings {nag_ids[:4]}",
+            f"checkov={len(ck):>2} {ck_ids[:3]}  "
+            f"serverless-rules={len(srv):>2} {srv_ids[:4]}  "
+            f"cdk-nag={len(nag):>2} {nag_ids[:3]}",
             flush=True,
         )
+    return rows
 
-    (HERE / "results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
-    print(f"\nwrote {HERE / 'results.json'}")
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    check = "--check" in argv
+
+    missing = missing_tools()
+    if missing:
+        print("cannot run the benchmark without: " + ", ".join(missing), file=sys.stderr)
+        return 2
+
+    payload = json.dumps(collect(), indent=2)
+    target = HERE / "results.json"
+
+    if check:
+        current = target.read_text(encoding="utf-8") if target.exists() else ""
+        if current.strip() != payload.strip():
+            print(
+                "\nresults.json no longer matches what the tools report. "
+                "Re-run docs/benchmark/run_benchmark.py and update docs/benchmark.md "
+                "if a cell changed.",
+                file=sys.stderr,
+            )
+            return 1
+        print("\nresults.json is current.")
+        return 0
+
+    target.write_text(payload, encoding="utf-8")
+    print(f"\nwrote {target}")
     return 0
 
 

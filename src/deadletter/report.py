@@ -56,6 +56,10 @@ def render_text(
         lines.append(f"[{prefix}{finding.verdict}] {finding.rule_id} - {finding.title}")
         if location:
             lines.append(f"  at {location}")
+        if finding.location and finding.location.address:
+            # A synthesized logical ID is not something the author can search
+            # for. The construct path is what they wrote.
+            lines.append(f"  construct: {finding.location.address}")
         lines.append(f"  {finding.message}")
         # The reader has to be able to tell a demonstrated violation from a
         # prediction without opening the JSON.
@@ -73,6 +77,10 @@ def render_text(
                 f"{', '.join(finding.defaults_relied_on)}"
             )
         lines.append(f"  resources: {', '.join(finding.resources)}")
+        if finding.overlaps:
+            # Better the reader hears it here than discovers it in another
+            # tool's output and starts wondering what else was oversold.
+            lines.append(f"  also reported by: {', '.join(finding.overlaps)}")
         if finding.suppressed and finding.suppression:
             lines.append(f"  suppressed by {finding.suppression}")
         for fix in finding.remediations:
@@ -122,14 +130,16 @@ def render_sarif(findings: list[Finding]) -> str:
     rules = []
     for rule_id in rule_ids:
         example = next(finding for finding in findings if finding.rule_id == rule_id)
-        rules.append(
-            {
-                "id": rule_id,
-                "name": example.title.replace(" ", ""),
-                "shortDescription": {"text": example.title},
-                "defaultConfiguration": {"level": _sarif_level(example.verdict)},
-            }
-        )
+        entry = {
+            "id": rule_id,
+            "name": example.title.replace(" ", ""),
+            "shortDescription": {"text": example.title},
+            "defaultConfiguration": {"level": _sarif_level(example.verdict)},
+        }
+        help_uri = _help_uri(rule_id)
+        if help_uri:
+            entry["helpUri"] = help_uri
+        rules.append(entry)
 
     results = []
     for finding in findings:
@@ -146,6 +156,12 @@ def render_sarif(findings: list[Finding]) -> str:
                 "basis": str(finding.basis),
                 "assumptions": finding.assumptions,
                 "inferred": finding.inferred,
+                "overlaps": finding.overlaps,
+                **(
+                    {"address": finding.location.address}
+                    if finding.location and finding.location.address
+                    else {}
+                ),
                 "remediations": [fix.to_dict() for fix in finding.remediations],
             },
         }
@@ -180,6 +196,21 @@ def render_sarif(findings: list[Finding]) -> str:
         ],
     }
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+DOCS_BASE = "https://github.com/NadavirinchiApps/Deadletter/blob/prod/"
+
+
+def _help_uri(rule_id: str) -> str | None:
+    """Where a code-scanning UI should send somebody who wants the reasoning."""
+    from .rules import get_rule
+
+    rule = get_rule(rule_id)
+    if rule is None or not rule.docs:
+        return None
+    if rule.docs.startswith(("http://", "https://")):
+        return rule.docs
+    return DOCS_BASE + rule.docs
 
 
 def _display_location(finding: Finding) -> str:

@@ -1,0 +1,23 @@
+# The same SNS loop with the guardrail switched off. RecursiveLoop: Allow tells
+# Lambda not to stop the recursion, so the loop is unbounded again: STALL.
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties: {TopicName: notifications}
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.notify
+      Runtime: python3.12
+      Timeout: 15
+      RecursiveLoop: Allow
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+      Events:
+        Fanout:
+          Type: SNS
+          Properties:
+            Topic: !Ref NotificationsTopic

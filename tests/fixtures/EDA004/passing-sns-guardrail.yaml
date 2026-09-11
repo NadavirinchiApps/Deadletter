@@ -1,0 +1,22 @@
+# An SNS-only loop. Lambda's own recursive-loop detection caps it at 16 hops,
+# so the impact is DEGRADED, not STALL: expensive, not unbounded.
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties: {TopicName: notifications}
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.notify
+      Runtime: python3.12
+      Timeout: 15
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+      Events:
+        Fanout:
+          Type: SNS
+          Properties:
+            Topic: !Ref NotificationsTopic

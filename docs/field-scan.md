@@ -201,3 +201,46 @@ Each fix carries a regression test in `tests/test_trust.py`.
 - **`aws-serverless-airline-booking` failed to clone** and is not included.
 - Findings were adjudicated by class, with samples inspected per class, not
   individually across all 160.
+
+## Re-run at 0.6.0
+
+The corpus was scanned again after the 0.5.0 trust fixes and the 0.6.0
+integration work, on 2026-09-07, from fresh clones of the same three
+repositories under the default policy. The commitment made when those fixes
+landed was that the block count would be unchanged or lower.
+
+| Measure | 0.4.1 | 0.6.0 |
+|---|--:|--:|
+| Templates scanned | 683 | 683 |
+| Templates entirely clean | 546 | 546 |
+| Templates with any finding | 137 | 137 |
+| Templates with at least one `BLOCK` | 5 | 5 |
+| Total findings | 317 | 317 |
+| `BLOCK` / `WARN` / `INFO` | 5 / 301 / 11 | 5 / 301 / 11 |
+| Under `--policy strict` | 262 blocks | 262 blocks |
+
+Identical, and the same five templates block:
+
+| Rule | Template |
+|---|---|
+| EDA005 | `serverless-patterns/dynamodb-streams-appsync-subscription` |
+| EDA005 | `serverless-patterns/dynamodb-streams-lambda-eventbridge-sam-node` |
+| EDA005 | `serverless-patterns/dynamodb-streams-lambda-eventbridge-sam-rust` |
+| EDA009 | `serverless-patterns/lambda-esm-ddb-filters-sam` |
+| EDA009 | `serverless-patterns/lambda-esm-kinesis-filters-sam` |
+
+Two of the 0.5.0 corrections could not show up here, and it is worth saying
+which rather than presenting an unchanged table as confirmation of everything:
+
+- **The `AWS::IAM::Policy` fix changes nothing on this corpus.** These are SAM
+  and hand-written CloudFormation templates, which write inline `Policies`. The
+  defect it fixed only appears in synthesized CDK output, and there is none in
+  these three repositories. It is covered by `tests/fixtures/cdk/` and by
+  `docs/samples/cdk`, not by this scan.
+- **EDA004 produces no findings on this corpus at all**, so the recursive-loop
+  guardrail scoping has no effect on these numbers either. It is covered by the
+  two fixtures added for it.
+
+What the re-run does establish is the thing worth checking: reading IAM policy
+resources, correcting two messages and adding four new code paths did not
+introduce a single new finding on 683 templates nobody wrote for us.

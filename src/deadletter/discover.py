@@ -14,11 +14,22 @@ Discovery and naming are treated differently on purpose:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 SUFFIXES = frozenset({".yaml", ".yml", ".json", ".template"})
+
+# What `cdk synth` calls a stack in its cloud assembly manifest. Each such
+# artifact names the template it wrote, relative to the assembly root.
+CDK_STACK_ARTIFACT = "aws:cloudformation:stack"
+
+# A directory holding no template is normally a typo worth failing on. Under
+# `--allow-empty` it is expected — pre-commit hands us whatever changed, and a
+# monorepo has directories with no infrastructure in them. The CLI has to tell
+# the two apart, so the message it recognises lives here rather than inline.
+NO_TEMPLATES = "no CloudFormation or SAM templates found"
 
 # Directories that either are not source or contain generated copies of
 # templates already scanned from their real location.
@@ -50,6 +61,7 @@ SKIP_DIRS = frozenset(
 class Target:
     path: Path
     explicit: bool  # named on the command line rather than found by walking
+    origin: str | None = None  # "cdk" when a cloud assembly manifest named it
 
 
 def resolve(inputs: Sequence[Path]) -> tuple[list[Target], list[str]]:
@@ -66,10 +78,14 @@ def resolve(inputs: Sequence[Path]) -> tuple[list[Target], list[str]]:
     for raw in inputs:
         path = Path(raw)
         if path.is_dir():
-            found = [p for p in walk(path) if p not in seen]
-            if not found:
-                problems.append(f"{path}: no CloudFormation or SAM templates found")
+            synthesized = [p for p in cdk_stacks(path) if p not in seen]
+            found = [p for p in walk(path) if p not in seen and p not in synthesized]
+            if not found and not synthesized:
+                problems.append(f"{path}: {NO_TEMPLATES}")
                 continue
+            for candidate in synthesized:
+                seen.add(candidate)
+                targets.append(Target(path=candidate, explicit=False, origin="cdk"))
             for candidate in found:
                 seen.add(candidate)
                 targets.append(Target(path=candidate, explicit=False))
@@ -93,6 +109,36 @@ def walk(root: Path) -> list[Path]:
         and not _skipped(path, root)
         and looks_like_template(path)
     ]
+    return found
+
+
+def cdk_stacks(root: Path) -> list[Path]:
+    """Templates a `cdk synth` under `root` says it produced.
+
+    The generic walk skips `cdk.out`, and rightly: it is generated output full
+    of assets and nested copies. But the manifest names exactly which files are
+    stacks, so a CDK team gets scanned without having to point at each template
+    by hand. Anything the manifest does not name is still skipped.
+    """
+    found: list[Path] = []
+    for manifest_path in sorted(root.rglob("cdk.out/manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # an unreadable manifest is reported by the coverage block
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, dict):
+            continue
+        assembly = manifest_path.parent
+        for _, artifact in sorted(artifacts.items()):
+            if not isinstance(artifact, dict) or artifact.get("type") != CDK_STACK_ARTIFACT:
+                continue
+            template = (artifact.get("properties") or {}).get("templateFile")
+            if not isinstance(template, str):
+                continue
+            candidate = assembly / template
+            if candidate.is_file() and candidate not in found:
+                found.append(candidate)
     return found
 
 
@@ -123,4 +169,12 @@ def looks_like_template(path: Path) -> bool:
     )
 
 
-__all__ = ["Target", "resolve", "walk", "looks_like_template", "SUFFIXES", "SKIP_DIRS"]
+__all__ = [
+    "Target",
+    "resolve",
+    "walk",
+    "cdk_stacks",
+    "looks_like_template",
+    "SUFFIXES",
+    "SKIP_DIRS",
+]

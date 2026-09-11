@@ -1,5 +1,163 @@
 # Changelog
 
+## 0.6.0
+
+0.5.0 fixed what the scanner got wrong. This release is about where it runs.
+No new rules: the twelve are enough to answer the question this project exists
+to ask, and asking it somewhere nobody has installed anything is worth more than
+a thirteenth.
+
+### CDK, through the cloud assembly
+
+`cdk.out` stays out of the generic walk — it is full of asset staging copies
+that would be scanned twice — but `cdk.out/manifest.json` names exactly which
+files are stacks, so `deadletter .` in a CDK repository now scans them. Findings
+from a synthesized template carry the construct path from `aws:cdk:path`:
+
+```text
+  at cdk.out/OrdersStack.template.json:121:4
+  construct: OrdersStack/Handler/Resource
+```
+
+`Handler886CB40B` is not something the author of the CDK app can search for.
+The path travels in JSON as `location.address` and in SARIF as a result
+property.
+
+CDK also writes state machine definitions as an `Fn::Join` of literal JSON
+fragments with `Fn::GetAtt` spliced in where the ARNs go. That arrived as a dict
+with no `States` key, so EDA010 was silent on every CDK workflow. The join is
+now reassembled with a placeholder for each reference, parsed, and the
+placeholders mapped back to resources — the workflow is read, and the graph
+still knows which resource stood at each point. Same for `Fn::Sub` bodies.
+
+`docs/samples/cdk` is a small CDK app whose synthesized output the whole path is
+checked against, rather than a template written by hand to look like one. It
+finds four defects, including one in the retry list AWS's own `LambdaInvoke`
+construct generates.
+
+### The rules run inside cfn-lint
+
+```console
+cfn-lint -t template.yaml -a deadletter.integrations.cfnlint
+```
+
+One adapter per rule, in the 9000 range cfn-lint reserves for rules it does not
+ship. Each finding is reported once: `E91xx` when the default policy would block
+it, `W91xx` otherwise, so the split survives a tool that has no policy flag.
+Optional dependency group `cfnlint`.
+
+### The rules run inside an AI reviewer
+
+`deadletter-mcp` serves `scan_paths`, `explain_rule` and `event_graph` over MCP.
+A model reviewing a diff cannot see that a queue's visibility timeout has to
+clear the timeout of a function three resources away; it guesses, and it guesses
+confidently. Reports carry the coverage block for the same reason the CLI does.
+
+The tool functions do not import the MCP SDK, so they are testable and reusable
+without it. Note for anyone following the 2026 plan: the SDK renamed `FastMCP`
+to `MCPServer` in 2.0, and the optional dependency is pinned `mcp>=2.0`.
+
+### pre-commit
+
+`.pre-commit-hooks.yaml`, plus the `--allow-empty` flag it needs: a checkout
+with no templates in it is not a wrong path when a hook is what is running.
+`allow-empty` is an input on the GitHub Action too.
+
+### Rule documentation
+
+`docs/rules/EDA001.md` through `EDA012.md`: what each rule detects, which values
+of each axis it can carry, whether it can ever block, the AWS documentation it
+rests on, **what it cannot know**, who else reports it, a real example, and how
+to suppress it. SARIF results link to them through `helpUri`, and the MCP
+`explain_rule` tool returns the page.
+
+`docs/field/README.md` is the write-up template for scans of production code,
+which is the evidence `docs/field-scan.md` is missing and Phase 2 is gated on.
+
+## 0.5.0
+
+Four things were wrong, and one of them meant the scanner reported a clean
+result on templates it had barely read.
+
+### The graph was blind to every CDK-synthesized stack
+
+CDK does not write inline `Policies`. It emits each grant as its own
+`AWS::IAM::Policy` resource with a `Roles` list, and the graph read only
+`Function.Policies` and `Role.Policies`. On a synthesized stack that meant no
+IAM-derived edges at all: EDA004, EDA007 and EDA012 were silent, and the report
+came back with findings missing rather than with a note saying so.
+
+`AWS::IAM::Policy` and `AWS::IAM::ManagedPolicy` are now parsed as
+`Kind.POLICY`, matched to a function's role by logical ID or by literal role
+name, and their statements feed the same publish and write edges as inline
+policies. Each edge records which policy resource it came from
+(`iam-policy-resource:<logical_id>`), so the statement behind an inferred edge
+can be opened. On `tests/fixtures/cdk/Stack.template.json` — a CDK-shaped stack
+that previously produced one edge and nothing else — the scan now finds the bus
+loop and the write against a 5-WCU table.
+
+### The coverage block said "unknown (3)"
+
+Which told a reader nothing they could act on. Unknown resources are now listed
+by CloudFormation type — `AWS::Lambda::Permission (1), AWS::CDK::Metadata (1)` —
+and a function whose execution role is not in the scan is named explicitly:
+"publish and write edges from IAM were not inferred for: ...". Roles and policies
+stopped being reported as kinds no rule reasons about, because they now are.
+
+### EDA001 described a state a fresh deploy cannot reach
+
+Lambda rejects `CreateEventSourceMapping` and `UpdateEventSourceMapping` with
+`InvalidParameterValueException` when the queue's visibility timeout is below the
+function's timeout. A template that violates the requirement does not deploy, so
+the old message — duplicate processing — described something that could not
+happen from this template. The live risk is an existing mapping whose queue
+timeout is lowered afterwards, which the SQS API accepts. The message now says
+both, and carries `aws_rejects_at_mapping_creation` in its evidence. It still
+blocks: the defect is real, and the deploy failure is worth catching first.
+
+### EDA004 claimed an unbounded loop where AWS caps it at 16
+
+Lambda's recursive-loop detection has been in every commercial region since
+August 2026: it drops an event after 16 hops around a Lambda/SQS/SNS/S3 loop and
+raises a Health event. A loop whose hub is an SNS topic and whose every node is a
+function, topic or queue is now reported as `DEGRADED` — 16 invocations per event
+plus a dropped event, expensive rather than unbounded — with
+`aws_runtime_guardrail: lambda-recursive-loop-detection` in the evidence. A
+function that sets `RecursiveLoop: Allow` turns the guardrail off and the finding
+back to `STALL`, naming the function that opted out. Loops through an EventBridge
+bus, a stream, or a state machine are not covered by the guardrail and were never
+downgraded.
+
+### Findings name the tools that also report them
+
+`Rule.overlaps` is stamped onto every finding and printed as `also reported by:`.
+EDA002 names `cfn-lint-serverless` ES6000/ES7000/ES4000/ES1007, Checkov
+CKV_AWS_116 and cdk-nag AwsSolutions-SQS3; EDA005 names ES1001 for its
+destination half. AWS ships `cfn-lint-serverless` free and it covers all of
+EDA002. The benchmark now measures it as a fourth tool, the README leads with
+what is left after that overlap, and every EDA002 finding says it out loud.
+
+### Removed
+
+- `Severity`, `Finding.severity`, and the `severity` key in JSON reports. 0.4.0
+  said they would go in the next minor. `verdict` is the only name for the
+  policy decision.
+
+### Also
+
+- `--policy` is available as a `policy` input on the GitHub Action.
+- `docs/benchmark/run_benchmark.py` no longer hardcodes an absolute path, runs
+  `cfn-lint-serverless` as a fourth tool, refuses to run with a tool missing,
+  and has a `--check` mode that CI runs on every push so the benchmark table
+  cannot rot quietly. Regenerating it caught three stale verdicts left over from
+  0.4.1.
+- CI runs on Windows as well as Ubuntu; the UTF-8 stdout fix in `cli.py` was
+  written for Windows and never tested there.
+- A tagged release builds, publishes to PyPI through trusted publishing, and
+  cuts a GitHub release.
+- SARIF results carry a `helpUri` per rule.
+- `scan()` accepts `policy` and `today`.
+
 ## 0.4.1
 
 Scanning 683 templates from `aws-samples/serverless-patterns`,

@@ -15,6 +15,9 @@ class EDA005(Rule):
     impact = Impact.STALL
     title = "Poison record blocks the shard until expiry"
     condition = "Any record the consumer cannot process."
+    # ES1001 checks that a stream mapping has an on-failure destination. The
+    # unbounded-retry half of this rule has no equivalent anywhere.
+    overlaps = ("cfn-lint-serverless ES1001",)
 
     def check(self, graph):
         for esm in graph.resources(Kind.ESM):

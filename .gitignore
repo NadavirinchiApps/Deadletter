@@ -5,3 +5,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+# Personal tool state: permission grants, local settings. Untracked by luck
+# until now, which is not a property to rely on.
+.claude/

@@ -1,0 +1,10 @@
+- id: deadletter
+  name: deadletter
+  description: Check event delivery between serverless resources before it is committed.
+  entry: deadletter . --allow-empty
+  language: python
+  # The scan reasons across resources, so it needs the whole repository rather
+  # than the files that happen to have changed. `--allow-empty` keeps it quiet
+  # in a checkout that has no templates in it.
+  pass_filenames: false
+  files: \.(ya?ml|json|template)$

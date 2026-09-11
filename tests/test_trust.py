@@ -262,6 +262,101 @@ def test_no_demand_for_an_on_failure_destination_that_already_exists():
 
 
 # --------------------------------------------------------------------------
+# IAM written as its own resource
+#
+# CDK emits every grant as a separate AWS::IAM::Policy. The graph read only
+# inline `Function.Policies` and `Role.Policies`, so on a synthesized stack it
+# built no IAM-derived edges at all: EDA004, EDA007 and EDA012 were silent and
+# the report came back clean because nothing had been looked at.
+# --------------------------------------------------------------------------
+
+CDK_STACK = FIXTURES / "cdk" / "Stack.template.json"
+
+
+def test_a_synthesized_stack_yields_the_loop_and_the_capacity_finding():
+    """Before this, the same template produced one rule_target edge and no
+    findings — the handler's permission to publish back to the bus that invoked
+    it lived in an AWS::IAM::Policy nobody read."""
+    graph = build(load(CDK_STACK))
+    findings = {f.rule_id: f for f in run(graph)}
+
+    assert "EDA004" in findings, "the bus loop through the IAM publish edge"
+    assert "EDA007" in findings, "the write edge to the 5-WCU table"
+    assert findings["EDA004"].impact is Impact.STALL
+    # ASSUMED rather than INFERRED because the seeded rule filters on `source`,
+    # and no template scan can show that filter excludes what the handler emits.
+    assert findings["EDA004"].confidence is Confidence.ASSUMED
+
+
+def test_the_coverage_block_names_what_it_did_not_read():
+    """"unknown (3)" told a reader nothing they could act on. The CFN type tells
+    them which three resources went unread and whether that matters."""
+    from deadletter.coverage import collect
+
+    coverage = collect([build(load(CDK_STACK))], rules_run=["EDA004"])
+
+    assert "AWS::Lambda::Permission" in coverage.uncovered_kinds
+    assert "AWS::CDK::Metadata" in coverage.uncovered_kinds
+    assert "unknown" not in coverage.uncovered_kinds
+
+
+# --------------------------------------------------------------------------
+# EDA001: do not describe a state a fresh deploy cannot reach
+#
+# Lambda rejects CreateEventSourceMapping and UpdateEventSourceMapping when the
+# queue's visibility timeout is below the function timeout. The old message
+# described duplicate processing on a template that does not deploy at all.
+# --------------------------------------------------------------------------
+
+def test_the_requirement_finding_says_where_aws_rejects_it():
+    findings = _eda("EDA001", FIXTURES / "EDA001" / "violating-requirement.yaml")
+    assert findings
+    finding = findings[0]
+
+    assert finding.evidence["aws_rejects_at_mapping_creation"] is True
+    assert "UpdateEventSourceMapping" in finding.message
+    assert "lowered afterwards" in finding.message
+    # The defect is still real, and still worth stopping a release for.
+    assert finding.verdict is Verdict.BLOCK
+
+
+# --------------------------------------------------------------------------
+# EDA004: AWS already stops some of these loops
+#
+# Lambda's recursive-loop detection drops an event after 16 hops around a
+# Lambda/SQS/SNS/S3 loop, in every commercial region. Calling that unbounded
+# overstates it, and an overstatement is what costs the next finding its reader.
+# --------------------------------------------------------------------------
+
+def test_an_sns_only_loop_is_degraded_because_lambda_stops_it():
+    findings = _eda("EDA004", FIXTURES / "EDA004" / "passing-sns-guardrail.yaml")
+    assert len(findings) == 1
+    finding = findings[0]
+
+    assert finding.impact is Impact.DEGRADED
+    assert finding.verdict is Verdict.INFO
+    assert finding.evidence["aws_runtime_guardrail"] == "lambda-recursive-loop-detection"
+    assert "16 invocations" in finding.message
+
+
+def test_the_same_loop_with_the_guardrail_switched_off_is_a_stall():
+    findings = _eda("EDA004", FIXTURES / "EDA004" / "violating-allow.yaml")
+    assert len(findings) == 1
+    finding = findings[0]
+
+    assert finding.impact is Impact.STALL
+    assert finding.evidence["recursive_loop_allowed_by"] == ["NotifyFunction"]
+    assert "aws_runtime_guardrail" not in finding.evidence
+
+
+def test_a_loop_through_an_event_bus_keeps_its_stall_impact():
+    """Lambda does not watch EventBridge, so a bus loop really is unbounded."""
+    findings = _eda("EDA004", FIXTURES / "EDA004" / "violating.yaml")
+    assert findings
+    assert findings[0].impact is Impact.STALL
+
+
+# --------------------------------------------------------------------------
 # The axes themselves
 # --------------------------------------------------------------------------
 

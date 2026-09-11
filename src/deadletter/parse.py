@@ -41,6 +41,8 @@ _TYPE_KIND: dict[str, m.Kind] = {
     "AWS::RDS::DBCluster": m.Kind.DATABASE,
     "AWS::CloudWatch::Alarm": m.Kind.ALARM,
     "AWS::IAM::Role": m.Kind.ROLE,
+    "AWS::IAM::Policy": m.Kind.POLICY,
+    "AWS::IAM::ManagedPolicy": m.Kind.POLICY,
     "AWS::ApiGateway::RestApi": m.Kind.API,
     "AWS::Serverless::Api": m.Kind.API,
     "AWS::Serverless::HttpApi": m.Kind.API,
@@ -59,6 +61,7 @@ _CLASS: dict[m.Kind, type[m.Resource]] = {
     m.Kind.TABLE: m.Table,
     m.Kind.STREAM_CONSUMER: m.StreamConsumer,
     m.Kind.ROLE: m.Role,
+    m.Kind.POLICY: m.Policy,
     m.Kind.INVOKE_CONFIG: m.EventInvokeConfig,
 }
 
@@ -84,6 +87,9 @@ class Template:
     ) -> None:
         self.resources = resources
         self.source = source
+        for resource in resources.values():
+            if resource.source_file is None:
+                resource.source_file = source
         self.locations = locations or {}
         # Logical IDs published through an Output Export. Another stack can
         # reach these, so their absence of local consumers proves less.
@@ -144,6 +150,20 @@ def loads(text: str, source: str | None = None) -> Template:
     return Template(
         _build(raw), source=source, locations=locations, exports=_exported_ids(raw)
     )
+
+
+def from_dict(raw: dict[str, Any], source: str | None = None) -> Template:
+    """Build a Template from an already-decoded template body.
+
+    For callers that run inside something which has already parsed the file —
+    cfn-lint hands its rules a decoded `cfn.template` — so the text is not
+    parsed twice and the two halves cannot disagree about what it says. Line
+    numbers are not available this way; the structural path still is.
+    """
+    plain = _plain(raw)
+    if not isinstance(plain, dict):
+        raise ValueError("template did not parse to a mapping")
+    return Template(_build(plain), source=source, exports=_exported_ids(plain))
 
 
 def _exported_ids(raw: dict[str, Any]) -> set[str]:
@@ -291,6 +311,8 @@ def _make(logical_id: str, cfn_type: str, kind: m.Kind, props: dict[str, Any], *
         resource.function = resolve(props.get("FunctionName"))
     if isinstance(resource, m.StreamConsumer):
         resource.stream = resolve(props.get("StreamARN"))
+    if isinstance(resource, m.Policy):
+        resource.roles = [resolve(role) for role in ensure_list(props.get("Roles"))]
     return resource
 
 
@@ -518,4 +540,4 @@ def sam_event_names(props: dict[str, Any]) -> list[str]:
     return [name for name, _ in iter_dict(props.get("Events"))]
 
 
-__all__ = ["Template", "load", "loads", "ensure_list"]
+__all__ = ["Template", "load", "loads", "from_dict", "ensure_list"]

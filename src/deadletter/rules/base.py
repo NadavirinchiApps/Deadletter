@@ -57,6 +57,11 @@ class Rule(ABC):
     basis: Basis = Basis.REQUIREMENT
     # One-line description of what has to be true in the account for this to bite.
     condition: str = ""
+    # Checks in other tools that report the same defect. Saying so is cheaper
+    # than being caught claiming novelty by a reader who already runs cfn-lint.
+    overlaps: tuple[str, ...] = ()
+    # Where the rule is written up. Defaults to docs/rules/<id>.md at register().
+    docs: str = ""
 
     @abstractmethod
     def check(self, graph: EventGraph) -> Iterable[Finding]:
@@ -71,6 +76,8 @@ def register(cls: type[Rule]) -> type[Rule]:
         raise ValueError(f"{cls.__name__} must define an id")
     if cls.id in _REGISTRY:
         raise ValueError(f"duplicate rule id {cls.id}")
+    if not cls.docs:
+        cls.docs = f"docs/rules/{cls.id}.md"
     _REGISTRY[cls.id] = cls
     return cls
 
@@ -94,10 +101,18 @@ def run(
     selected = [rule for rule in all_rules() if selected_ids is None or rule.id in selected_ids]
     findings: list[Finding] = []
     for rule in selected:
-        findings.extend(rule.check(graph))
+        produced = list(rule.check(graph))
+        for finding in produced:
+            if rule.overlaps and not finding.overlaps:
+                finding.overlaps = list(rule.overlaps)
+        findings.extend(produced)
     for finding in findings:
         if finding.source is None:
-            finding.source = graph.template.source
+            # The file the resource came from, not the file the graph was built
+            # from: once several stacks are merged into one graph those differ,
+            # and a finding must point at the file a reader can open.
+            owner = graph.template.get(finding.resources[0]) if finding.resources else None
+            finding.source = getattr(owner, "source_file", None) or graph.template.source
         if finding.location is None:
             if finding.remediations:
                 finding.location = finding.remediations[0].location

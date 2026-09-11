@@ -88,3 +88,136 @@ def test_env_var_mention_alone_is_not_a_write_edge(orders):
     writes = edge_set(orders, "writes")
     assert ("NotifyCustomerFunction", "OrdersTable") not in writes
     assert all(e.props.get("basis") == "iam-policy" for e in orders.edges("writes"))
+
+
+# --------------------------------------------------------------------------
+# IAM written as its own resource
+#
+# CDK emits every grant as a separate AWS::IAM::Policy, so a graph that reads
+# only inline `Policies` sees a role with no permissions and builds no edges.
+# --------------------------------------------------------------------------
+
+CDK_SHAPED = """
+Resources:
+  OrdersBus:
+    Type: AWS::Events::EventBus
+    Properties: {Name: orders}
+  HandlerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - {Action: sts:AssumeRole, Effect: Allow, Principal: {Service: lambda.amazonaws.com}}
+  HandlerServiceRoleDefaultPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: events:PutEvents
+            Effect: Allow
+            Resource: {"Fn::GetAtt": [OrdersBus, Arn]}
+      PolicyName: HandlerServiceRoleDefaultPolicy
+      Roles: [{Ref: HandlerServiceRole}]
+  Handler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: {"Fn::GetAtt": [HandlerServiceRole, Arn]}
+"""
+
+
+def test_a_policy_resource_attached_by_ref_produces_the_publish_edge():
+    graph = build(loads(CDK_SHAPED))
+    assert ("Handler", "OrdersBus") in edge_set(graph, "publish")
+
+
+def test_the_policy_edge_names_the_resource_its_statements_came_from():
+    """A reader has to be able to open the policy the edge was derived from."""
+    graph = build(loads(CDK_SHAPED))
+    edge = next(iter(graph.edges("publish")))
+    assert edge.inferred is True
+    assert edge.props["policy_source"] == "iam-policy-resource:HandlerServiceRoleDefaultPolicy"
+    assert graph.policy_resources_read == {"HandlerServiceRoleDefaultPolicy"}
+
+
+def test_a_managed_policy_attached_by_literal_role_name_also_counts():
+    """`Roles` may carry a hardcoded RoleName rather than a Ref."""
+    graph = build(
+        loads(
+            """
+            Resources:
+              OrdersTable:
+                Type: AWS::DynamoDB::Table
+                Properties: {TableName: orders}
+              WorkerRole:
+                Type: AWS::IAM::Role
+                Properties: {RoleName: worker-role}
+              WorkerWrites:
+                Type: AWS::IAM::ManagedPolicy
+                Properties:
+                  Roles: [worker-role]
+                  PolicyDocument:
+                    Statement:
+                      - Action: [dynamodb:PutItem]
+                        Effect: Allow
+                        Resource: {"Fn::GetAtt": [OrdersTable, Arn]}
+              Worker:
+                Type: AWS::Lambda::Function
+                Properties:
+                  Handler: app.handler
+                  Role: {"Fn::GetAtt": [WorkerRole, Arn]}
+            """
+        )
+    )
+    assert ("Worker", "OrdersTable") in edge_set(graph, "writes")
+
+
+def test_a_role_outside_the_template_is_recorded_rather_than_ignored():
+    """No edges can be derived from a role this scan cannot read. Saying so is
+    the difference between "checked" and "did not look"."""
+    graph = build(
+        loads(
+            """
+            Resources:
+              Worker:
+                Type: AWS::Lambda::Function
+                Properties:
+                  Handler: app.handler
+                  Role: {"Fn::ImportValue": platform-worker-role-arn}
+            """
+        )
+    )
+    assert "Worker" in graph.unresolved_roles
+
+
+def test_a_policy_attached_to_another_role_grants_this_function_nothing():
+    """Matching any policy in the template would invent permissions."""
+    graph = build(
+        loads(
+            """
+            Resources:
+              OrdersBus:
+                Type: AWS::Events::EventBus
+                Properties: {Name: orders}
+              WorkerRole:
+                Type: AWS::IAM::Role
+                Properties: {}
+              OtherRole:
+                Type: AWS::IAM::Role
+                Properties: {}
+              OtherPolicy:
+                Type: AWS::IAM::Policy
+                Properties:
+                  Roles: [{Ref: OtherRole}]
+                  PolicyDocument:
+                    Statement:
+                      - {Action: events:PutEvents, Effect: Allow, Resource: {"Fn::GetAtt": [OrdersBus, Arn]}}
+              Worker:
+                Type: AWS::Lambda::Function
+                Properties:
+                  Handler: app.handler
+                  Role: {"Fn::GetAtt": [WorkerRole, Arn]}
+            """
+        )
+    )
+    assert not edge_set(graph, "publish")

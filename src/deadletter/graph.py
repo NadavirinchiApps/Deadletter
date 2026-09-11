@@ -14,7 +14,7 @@ import networkx as nx
 
 from . import model as m
 from .findings import SourceLocation
-from .intrinsics import ensure_list, referenced_ids, resolve
+from .intrinsics import ensure_list, referenced_ids, resolve, resolve_definition
 from .parse import Template
 
 DELIVERY_EDGES = frozenset({"poll", "rule_target", "subscribe", "invoke"})
@@ -82,6 +82,12 @@ class EventGraph:
     def __init__(self, template: Template) -> None:
         self.template = template
         self.g = nx.MultiDiGraph()
+        # Functions whose execution role points somewhere this template cannot
+        # follow. Their IAM-derived edges do not exist, and the coverage block
+        # has to say so rather than let the silence read as "no permissions".
+        self.unresolved_roles: dict[str, str] = {}
+        # Policy resources whose statements were read into edges, by logical ID.
+        self.policy_resources_read: set[str] = set()
         self._build()
 
     # -- construction -------------------------------------------------
@@ -177,6 +183,12 @@ class EventGraph:
             self._add(queue, dlq, "redrive", props={"max_receive_count": queue.max_receive_count})
 
     def _add_function_edges(self, function: m.Function) -> None:
+        role_reference = function.ref("Role")
+        if role_reference.configured and not isinstance(
+            self.template.resolve_ref(role_reference), m.Role
+        ):
+            self.unresolved_roles[function.logical_id] = _reference_text(role_reference)
+
         dlq = self.template.resolve_ref(function.dead_letter_queue)
         if dlq is not None:
             self._add(function, dlq, "dlq")
@@ -224,18 +236,49 @@ class EventGraph:
             document = policy.get("PolicyDocument", policy)
             if not isinstance(document, dict):
                 continue
-            for statement in ensure_list(document.get("Statement")):
-                if not isinstance(statement, dict) or str(statement.get("Effect", "Allow")).lower() != "allow":
-                    continue
-                actions = {
-                    action.lower()
-                    for action in ensure_list(statement.get("Action"))
-                    if isinstance(action, str)
-                }
-                targets = self._policy_target_ids(statement.get("Resource"))
-                if actions and targets:
-                    permissions.append((actions, targets, "iam-policy"))
+            permissions.extend(
+                self._statement_permissions(ensure_list(document.get("Statement")), "iam-policy")
+            )
+
+        # IAM written as its own resource. CDK emits every grant this way, so a
+        # synthesized stack has no inline `Policies` at all: without this the
+        # role looks empty and the graph loses every publish and write edge.
+        for attached in self._attached_policies(role):
+            statements = attached.policy_statements
+            found = self._statement_permissions(
+                statements, f"iam-policy-resource:{attached.logical_id}"
+            )
+            if found:
+                self.policy_resources_read.add(attached.logical_id)
+            permissions.extend(found)
         return permissions
+
+    def _attached_policies(self, role: m.Resource | None) -> list[m.Policy]:
+        """Policy resources whose `Roles` names this role."""
+        if role is None:
+            return []
+        return [
+            policy
+            for policy in self.template.of_kind(m.Kind.POLICY)
+            if isinstance(policy, m.Policy) and policy.attaches_to(role)
+        ]
+
+    def _statement_permissions(
+        self, statements: Iterable[Any], basis: str
+    ) -> list[tuple[set[str], set[str], str]]:
+        found: list[tuple[set[str], set[str], str]] = []
+        for statement in statements:
+            if not isinstance(statement, dict) or str(statement.get("Effect", "Allow")).lower() != "allow":
+                continue
+            actions = {
+                action.lower()
+                for action in ensure_list(statement.get("Action"))
+                if isinstance(action, str)
+            }
+            targets = self._policy_target_ids(statement.get("Resource"))
+            if actions and targets:
+                found.append((actions, targets, basis))
+        return found
 
     def _policy_target_ids(self, node: Any) -> set[str]:
         """Resolve logical references and literal names/ARNs in a policy resource."""
@@ -279,10 +322,12 @@ class EventGraph:
             if str(state.get("Type")) != "Task":
                 continue
             parameters = state.get("Parameters")
-            candidates = [resolve(state.get("Resource"))]
+            # A CDK definition arrives with placeholders where the ARNs were,
+            # so the reference has to be read through them.
+            candidates = [resolve_definition(state.get("Resource"))]
             if isinstance(parameters, dict):
                 for key in ("FunctionName", "QueueUrl", "TopicArn", "StateMachineArn"):
-                    candidates.append(resolve(parameters.get(key)))
+                    candidates.append(resolve_definition(parameters.get(key)))
             for reference in candidates:
                 target = self.template.resolve_ref(reference)
                 if target is None:
@@ -426,7 +471,12 @@ class EventGraph:
         path = item.property_path(*parts) if item is not None else ()
         line, column = self.template.location(path)
         pointer = "/" + "/".join(_pointer_escape(part) for part in path) if path else ""
-        return SourceLocation(path=pointer, line=line, column=column)
+        return SourceLocation(
+            path=pointer,
+            line=line,
+            column=column,
+            address=item.construct_path if item is not None else None,
+        )
 
     def to_mermaid(self) -> str:
         shapes = {
@@ -459,6 +509,15 @@ class EventGraph:
 
 def _pointer_escape(value: str | int) -> str:
     return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _reference_text(reference) -> str:
+    """How the template wrote a reference, for a coverage note to quote back."""
+    if reference.logical_ids:
+        return ", ".join(sorted(reference.logical_ids))
+    if reference.literal:
+        return reference.literal
+    return "an unresolved value"
 
 
 def build(template: Template) -> EventGraph:

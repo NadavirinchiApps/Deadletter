@@ -89,10 +89,6 @@ class Verdict(StrEnum):
         return {"BLOCK": 0, "WARN": 1, "INFO": 2}[self.value]
 
 
-# Retained so `from .findings import Severity` keeps working for one release.
-# The name was the bug: it meant impact, confidence and policy at once.
-Severity = Verdict
-
 BREAKING_IMPACTS = frozenset({Impact.LOSS, Impact.STALL, Impact.DUPLICATION})
 
 
@@ -177,6 +173,10 @@ class SourceLocation:
     path: str
     line: int | None = None
     column: int | None = None
+    # What the author calls this resource in the language they actually wrote:
+    # a CDK construct path, later a Terraform resource address. A synthesized
+    # logical ID like `Handler2F3E4D5C` is not something anyone can search for.
+    address: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"path": self.path}
@@ -184,6 +184,8 @@ class SourceLocation:
             data["line"] = self.line
         if self.column is not None:
             data["column"] = self.column
+        if self.address is not None:
+            data["address"] = self.address
         return data
 
 
@@ -238,6 +240,10 @@ class Finding:
     # on these; `--policy strict` will.
     defaults_relied_on: list[str] = field(default_factory=list)
     patch_hint: str | None = None
+    # Other tools that report this same defect, stamped from `Rule.overlaps`.
+    # A reader who already runs one of them deserves to hear it from us rather
+    # than discover it later and wonder what else was oversold.
+    overlaps: list[str] = field(default_factory=list)
     source: str | None = None
     location: SourceLocation | None = None
     remediations: list[Remediation] = field(default_factory=list)
@@ -273,11 +279,6 @@ class Finding:
         return self.confidence is not Confidence.CONFIRMED
 
     @property
-    def severity(self) -> Verdict:
-        """Deprecated alias for `verdict`, kept for one release."""
-        return self.verdict
-
-    @property
     def headline(self) -> str:
         return f"{self.verdict}: {self.message}"
 
@@ -295,8 +296,6 @@ class Finding:
         return {
             "rule_id": self.rule_id,
             "verdict": str(self.verdict),
-            # Deprecated: same value as `verdict`. Removed in the next minor.
-            "severity": str(self.verdict),
             "impact": str(self.impact),
             "confidence": str(self.confidence),
             "basis": str(self.basis),
@@ -307,6 +306,7 @@ class Finding:
             "evidence": dict(self.evidence),
             "assumptions": list(self.assumptions),
             "defaults_relied_on": list(self.defaults_relied_on),
+            "overlaps": list(self.overlaps),
             "patch_hint": self.patch_hint,
             "inferred": self.inferred,
             "source": self.source,
